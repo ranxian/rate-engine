@@ -1,0 +1,12 @@
+# 2 million
+time python engine_run.py localhost ~/RATE_ROOT/benchmarks/df2ee567-cb1f-4cf4-8b02-4b46882ad746/ ~/RATE_ROOT/temp/result1 algorithms/01fc27c3-2284-448d-bc04-01e3de59951d/2cb7a728-2362-4b77-87b7-7feffaa1ca6b/ 10000 52428800
+
+#very small one
+time python engine_run.py localhost ~/RATE_ROOT/benchmarks/43a30f83-9ff2-438a-afbf-325bc841e51b/ /tmp algorithms/01fc27c3-2284-448d-bc04-01e3de59951d/2cb7a728-2362-4b77-87b7-7feffaa1ca6b/ 10000 52428800
+
+# the impost all super big
+time python engine_run.py localhost ~/rate3/tools/python/misc/impostall ~/rate3/tools/python/misc/impostall algorithms/01fc27c3-2284-448d-bc04-01e3de59951d/2cb7a728-2362-4b77-87b7-7feffaa1ca6b/ 10000 52428800
+
+# under examples/
+time python engine_run.py localhost ./examples ./examples algorithms/01fc27c3-2284-448d-bc04-01e3de59951d/2cb7a728-2362-4b77-87b7-7feffaa1ca6b/ 10000 52428800
+

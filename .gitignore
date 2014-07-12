@@ -1,0 +1,5 @@
+RATE_ROOT/
+rate_run_perf.txt
+dist/
+producer.conf
+*.pyc

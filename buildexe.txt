@@ -1,0 +1,3 @@
+install cx_freeze from official website 
+install every module that we need with "easy_install --always-unzip" because cx_freeze does not support eggs
+cxfreeze xxx.py --target-dir xxx
