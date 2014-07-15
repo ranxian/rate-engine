@@ -362,15 +362,17 @@ class RateProducer:
 #        print "enrollCallBack called"
         progress_part = 0.3
         with self.enroll_lock:
+
 #            print "enrollCallBack runs"
             result = pickle.loads(body)
             self.finished_enroll_subtask_uuids.append(result['subtask_uuid'])
             ch.basic_ack(delivery_tag=method.delivery_tag)
             for rawResult in result['results']:
-                self.finished_enroll_uuids.add(rawResult['uuid'])
-                print>>self.enroll_result_file, "%s %s" % (rawResult['uuid'], rawResult['result'])
+                bxxid = self.uuid_bxx_table[rawResult['uuid']]
+                self.finished_enroll_uuids.add(bxxid)
+                print>>self.enroll_result_file, "%s %s" % (bxxid, rawResult['result'])
                 if rawResult['result']=='failed':
-                    self.failed_enroll_uuids.add(rawResult['uuid'])
+                    self.failed_enroll_uuids.add(bxxid)
             print "enroll result [%s] finished [%d/%d] failed/total [%d/%d]" % (result['subtask_uuid'][:8], len(self.finished_enroll_subtask_uuids), len(self.enroll_subtask_uuids), len(self.failed_enroll_uuids), len(self.enroll_uuids))
 
             # write progress
@@ -407,18 +409,20 @@ class RateProducer:
             self.finished_match_subtask_uuids.append(result['subtask_uuid'])
             ch.basic_ack(delivery_tag=method.delivery_tag)
             for rawResult in result['results']:
+                bxxid1 = self.uuid_bxx_table[rawResult['uuid1']]
+                bxxid2 = self.uuid_bxx_table[rawResult['uuid2']]
                 if USE_MEMCACHE:
                     cache_value = [rawResult['result'], rawResult['match_type']]
                 if rawResult['result'] == 'ok':
-                    print>>self.match_result_file, '%s %s %s ok %s' % (rawResult['uuid1'], rawResult['uuid2'], rawResult['match_type'], rawResult['score'])
+                    print>>self.match_result_file, '%s %s %s ok %s' % (bxxid1, bxxid2, rawResult['match_type'], rawResult['score'])
                     if USE_MEMCACHE:
                         cache_value.append(rawResult['score'])
                 elif rawResult['result'] == 'failed':
-                    print>>self.match_result_file, '%s %s %s failed' % (rawResult['uuid1'], rawResult['uuid2'], rawResult['match_type'])
+                    print>>self.match_result_file, '%s %s %s failed' % (bxxid1, bxxid2, rawResult['match_type'])
                     self.failed_match_count += 1
                 if USE_MEMCACHE:
                     try:
-                        cache_key = formMatchKey(self.matchEXEUUID, rawResult['uuid1'], rawResult['uuid2'])
+                        cache_key = formMatchKey(self.matchEXEUUID, bxxid1, bxxid2)
                         self.matchCallBack_cache_conn.set(cache_key, json.dumps(cache_value))
                     except Exception, e:
 #                        print e
