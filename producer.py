@@ -14,6 +14,7 @@ import time
 import uuid
 import ConfigParser
 from matchresult2bxx import matchresult2bxx
+from task_bitmap import BMManager
 
 config = ConfigParser.ConfigParser()
 config.readfp(open('%s/producer.conf' % os.path.dirname(__file__), 'r'))
@@ -64,7 +65,8 @@ class RateProducer:
         self.matchEXEUUID = [ v for v in self.matchEXE.split('/') if v!="" ][-2].replace('-','')
         self.timelimit = timelimit
         self.memlimit = memlimit
-
+        self.ongoing_file_path = "/".join((result_file_dir, 'task.ongoing'))
+        self.bmf_path = "/".join((result_file_dir, 'task.bm'))
         self.state_file_path = "/".join((result_file_dir, "state.txt"))
 
 #        self.conn = TornadoConnection(pika.ConnectionParameters(host))
@@ -79,8 +81,6 @@ class RateProducer:
         self.finished_match_subtask_uuids = []
         if not os.path.isdir(result_file_dir):
             os.makedirs(result_file_dir)
-        self.enroll_result_file = open("/".join((result_file_dir, 'enroll_result.txt')), 'w')
-        self.match_result_file = open("/".join((result_file_dir, 'match_result.txt')), 'w')
         self.finished_enroll_uuids = set()
 #        self.finished_match_uuids = set()
         self.failed_enroll_uuids = set()
@@ -92,6 +92,9 @@ class RateProducer:
         self.enroll_result_qname = 'results-enroll-%s' % (self.uuid,)
         self.match_result_qname = 'results-match-%s' % (self.uuid,)
         self.enroll_uuids = set()
+
+        self.enroll_result_file_path = "/".join((result_file_dir, 'enroll_result.txt'))
+        self.match_result_file_path = "/".join((result_file_dir, 'match_result.txt'))
 
     def submitEnrollBlock(self, l):
         subtask = self.genSubtask(l, 'enroll')
@@ -133,12 +136,69 @@ class RateProducer:
     def prepare(self):
         print "preparing queues"
         self.ch.queue_declare(queue='jobs', durable=False, exclusive=False, auto_delete=False)
+
+        print "Init BMManager"
+        nline = 0
+        uuid_table_f = open(self.uuid_table_file_path, 'r')
+        while True:
+            line = bf.readline()
+            if line == '' or line == "\n":
+                break
+            nline += 1
+        uuid_table_f.close()
+        self.manager = BMManager(self.bmf_path, nline)
+        print 'Inited with %d samples' % (nline)
+
+        print 'Check ongoing_file_path'
+        if os.path.exists(self.ongoing_file_path):
+            print 'ongoing_file exists, read uuid from it'
+            f = open(self.ongoing_file_path, 'r')
+            self.uuid = f.readline.rstrip("\n")
+            f.close()
+        else:
+            print 'not ongoing_file, create and write uuid to it'
+            f = open(self.ongoing_file_path, 'w')
+            f.write(self.uuid + '\n')
+            f.close()
+
         # prepare dirs
         print "preparing dirs on server"
-        os.makedirs("/".join((PRODUCER_RATE_ROOT, 'temp', self.uuid[-12:])))
-        for i in range(16*16):
-            tdir = str(hex(i+256))[-2:]
-            os.mkdir("/".join((PRODUCER_RATE_ROOT, 'temp', self.uuid[-12:], tdir)))
+        if os.path.exists(ongoing_file_path):
+            print 'ongoing_file exists, no need to prepare dir'
+        else:
+            os.makedirs("/".join((PRODUCER_RATE_ROOT, 'temp', self.uuid[-12:])))
+            for i in range(16*16):
+                tdir = str(hex(i+256))[-2:]
+                os.mkdir("/".join((PRODUCER_RATE_ROOT, 'temp', self.uuid[-12:], tdir)))
+
+        print 'See if enroll result exists'
+        if os.path.exists(self.enroll_result_file_path):
+            print 'previous enroll result exist, read from it'
+            f = open(self.enroll_result_file_path, 'r')
+            i = 0
+            while True:
+                line = f.readline()
+                if line == '' or line == "\n":
+                    break
+                uuid, result = line.split(' ')
+                if result == 'ok':
+                    self.finished_enroll_uuids.add(uuid)
+                else:
+                    self.failed_enroll_uuids.add(uuid)
+                self.finished_enroll_uuids.add(uuid)
+                self.enroll_uuids.add(uuid)
+                i += 1
+            f.close()
+            print i, 'enroll result loaded'
+        else:
+            open(self.enroll_result_file_path, 'w').close()
+        self.enroll_result_file = open(self.enroll_result_file_path, 'a')
+
+        print 'See if match result exists'
+        if not os.path.exists(self.match_result_file_path):
+            open(self.match_result_file_path, 'w').close()
+        self.match_result_file = open(self.match_result_file_path, 'a')
+
         print "prepare finished"
 
     def doEnroll(self):
@@ -157,27 +217,23 @@ class RateProducer:
             enroll_result_thread.start()
         wait = False
         while True:
-            print 'While loop'
             if wait == True:
                 time.sleep(60)
                 wait = False
-            print 'Acquiring lock 1'
             with self.enroll_lock:
-                print 'Lock get'
                 working_enroll_subtasks = len(self.enroll_subtask_uuids)-len(self.finished_enroll_subtask_uuids)
                 if working_enroll_subtasks >= MAX_WORKING_ENROLL_SUBTASKS:
                     print "%d enroll queue full, wait for 1 min" % (working_enroll_subtasks, )
                     wait = True
                     continue
-                print 'Begin read'
                 a = enrollf.readline()
-                print 'Line read'
                 lines_proceeded += 1
                 if lines_proceeded%1000==0:
                     print "%d enrolls proceeded" % lines_proceeded
 
                 if len(a)==0:
                     break
+
                 (bxx, u, f) = a.strip().split(' ')
                 f = "/".join(('samples', f))
 
@@ -292,6 +348,11 @@ class RateProducer:
                             print>>self.match_result_file, '%s %s %s failed' % (u1, u2, cache_value[1])
 #                        self.match_result_file.flush()
                         continue
+
+                # Check bitmap file
+                if manager.query_line(a) == 1:
+                    continue
+
                 if u1 in self.failed_enroll_uuids or u2 in self.failed_enroll_uuids:
                     continue
                 f1 = 'temp/%s/%s/%s.t' % (self.uuid[-12:], u1[-12:-10], u1[-10:])
@@ -368,11 +429,11 @@ class RateProducer:
             self.finished_enroll_subtask_uuids.append(result['subtask_uuid'])
             ch.basic_ack(delivery_tag=method.delivery_tag)
             for rawResult in result['results']:
-                bxxid = self.uuid_bxx_table[rawResult['uuid']]
-                self.finished_enroll_uuids.add(bxxid)
-                print>>self.enroll_result_file, "%s %s" % (bxxid, rawResult['result'])
+                uuid = rawResult['uuid']
+                self.finished_enroll_uuids.add(uuid)
+                print>>self.enroll_result_file, "%s %s" % (uuid, rawResult['result'])
                 if rawResult['result']=='failed':
-                    self.failed_enroll_uuids.add(bxxid)
+                    self.failed_enroll_uuids.add(uuid)
             print "enroll result [%s] finished [%d/%d] failed/total [%d/%d]" % (result['subtask_uuid'][:8], len(self.finished_enroll_subtask_uuids), len(self.enroll_subtask_uuids), len(self.failed_enroll_uuids), len(self.enroll_uuids))
 
             # write progress
@@ -432,7 +493,10 @@ class RateProducer:
             state_file.write("%f\n" % (0.3 + 0.7 * float(len(self.finished_match_subtask_uuids))/len(self.match_subtask_uuids)))
             state_file.close()
 
-#            self.match_result_file.flush()
+            # Add match result to bitmap
+            self.manager.update_bitmap('%s %s', bxxid1, bxxid2)
+
+            self.match_result_file.flush()
             if (not self.submitting_match) and len(self.finished_match_subtask_uuids)==len(self.match_subtask_uuids):
                 ch.stop_consuming()
 

@@ -15,7 +15,9 @@ class BMManager:
     self.bmfname = bmfname
     self.bmf = open(bmfname, 'a')
     self.MATCH_RESULT_LIMIT = self.nsample * (self.nsample + 1) + 10
-    self.bmf.seek(self.MATCH_RESULT_LIMIT)
+    self.ENROLL_RESULT_LIMIT = self.MATCH_RESULT_LIMIT + self.nsample + 10
+    self.ENROLL_RESULT_START = self.MATCH_RESULT_LIMIT + 5
+    self.bmf.seek(self.ENROLL_RESULT_LIMIT)
     self.bmf.write(struct.pack('B', 0))
     self.bmrf = open(bmfname, 'r')
 
@@ -28,7 +30,7 @@ class BMManager:
 
     return key
 
-  def create_bitmap(self, infname):
+  def create_bitmap(self, infname, enroll=False):
     inf = open(infname, 'r')
 
     i = 0
@@ -37,23 +39,34 @@ class BMManager:
       if line == "" or line == "\n":
         break
       line = line.rstrip("\n")
-      self.update_bitmap([line])
+      self.update_bitmap([line], enroll)
       i += 1
       if i % 100000 == 0:
         print '%i done' % (i)
 
     inf.close()
 
-  def update_bitmap(self, lines):
+  def update_bitmap(self, lines, enroll=False):
     for line in lines:
-      bxx1, bxx2 = line.split(' ')[:2]
-      key = self.get_key(bxx1, bxx2)
+      key = None
+      if not enroll:
+        bxx1, bxx2 = line.split(' ')[:2]
+        key = self.get_key(bxx1, bxx2)
+      else:
+        bxx = line.split(' ')[0]
+        key = bxx2num(bxx) + self.ENROLL_RESULT_START
       self.bmf.seek(key)
       self.bmf.write(struct.pack('B', 1))
 
-  def query_line(self, line):
-    bxx1, bxx2 = line.split(' ')[:2]
-    key = self.get_key(bxx1, bxx2)
+  def query_line(self, line, enroll=False):
+    key = None
+    if enroll:
+      bxx = line.split(' ')[0]
+      key = bxx2num(bxx) + self.ENROLL_RESULT_START
+    else:
+      bxx1, bxx2 = line.split(' ')[:2]
+      key = self.get_key(bxx1, bxx2)
+
     self.bmrf.seek(key)
     done = struct.unpack('B', self.bmrf.read(1))[0]
     return done
