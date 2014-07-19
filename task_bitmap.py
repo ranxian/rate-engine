@@ -1,5 +1,6 @@
 import sys
 import struct
+import os.path
 
 def bxx2num(bxx):
   bxx = bxx[::-1]
@@ -13,11 +14,13 @@ class BMManager:
   def __init__(self, bmfname, nsample):
     self.nsample = nsample
     self.bmfname = bmfname
-    self.bmf = open(bmfname, 'a')
     self.MATCH_RESULT_LIMIT = self.nsample * (self.nsample + 1) + 10
-    self.bmf.seek(self.MATCH_RESULT_LIMIT)
-    self.bmf.write(struct.pack('B', 0))
-    self.bmrf = open(bmfname, 'r')
+    if not os.path.exists(bmfname):
+      self.bmf = open(bmfname, 'w')
+      self.bmf.seek(self.MATCH_RESULT_LIMIT)
+      self.bmf.write(struct.pack('B', 0))
+      self.bmf.close()
+    self.bmf = open(bmfname, 'r+')
 
   def get_key(self, bxx1, bxx2):
     num1 = bxx2num(bxx1)
@@ -54,14 +57,14 @@ class BMManager:
   def query_line(self, line):
     bxx1, bxx2 = line.split(' ')[:2]
     key = self.get_key(bxx1, bxx2)
-    self.bmrf.seek(key)
-    done = struct.unpack('B', self.bmrf.read(1))[0]
+    self.bmf.seek(key)
+    done = struct.unpack('B', self.bmf.read(1))[0]
     return done
 
   def query(self, bxx1, bxx2):
     key = self.get_key(bxx1, bxx2)
-    self.bmrf.seek(key)
-    done = struct.unpac('B', self.bmrf.read(1))[0]
+    self.bmf.seek(key)
+    done = struct.unpac('B', self.bmf.read(1))[0]
     return done
 
   def destroy(self):
