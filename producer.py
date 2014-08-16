@@ -90,12 +90,14 @@ class RateProducer:
         self.submitting_match = False
         self.enroll_lock = threading.Lock() # should be locked whether submitting or receiving result
         self.match_lock = threading.Lock()
+        self.heart_beat_lock = threading.Lock()
         self.enroll_result_qname = 'results-enroll-%s' % (self.uuid,)
         self.match_result_qname = 'results-match-%s' % (self.uuid,)
         self.enroll_uuids = set()
 
         self.enroll_result_file_path = "/".join((result_file_dir, 'enroll_result.txt'))
         self.match_result_file_path = "/".join((result_file_dir, 'match_result_bxx.txt'))
+        self.all_finished = False
 
     def submitEnrollBlock(self, l):
         subtask = self.genSubtask(l, 'enroll')
@@ -210,6 +212,11 @@ class RateProducer:
         if not os.path.exists(self.match_result_file_path):
             open(self.match_result_file_path, 'w').close()
         self.match_result_file = open(self.match_result_file_path, 'a')
+
+        # prepare heart beat thread
+        hbt = threading.Thread(target=self.make_heart_beat)
+        hbt.start()
+        print 'Start heart beat thread'
 
         print "prepare finished"
 
@@ -335,7 +342,7 @@ class RateProducer:
                     continue
 
                 i = i+1
-                if i%10000==0:
+                if i%100000==0:
                     print "%d matches proceeded" % (i,)
 
                 a = benchmarkf.readline() # 11 22 I
@@ -369,7 +376,7 @@ class RateProducer:
                 # Check bitmap file
                 if self.manager.query_line(a) == 1:
                   self.already_match_number += 1
-                  if self.already_match_number % 1000 == 0:
+                  if self.already_match_number % 100000 == 0:
                     print 'already', self.already_match_number, 'matched'
                   continue
 
@@ -403,20 +410,22 @@ class RateProducer:
         print "all matches submitted, waiting for all results"
         match_result_thread.join()
         print "match finished, failed %d" % self.failed_match_count
+        with self.heart_beat_lock:
+          self.all_finished = True
 
     def solve(self):
-        try:
+        #try:
             self.prepare()
             self.doEnroll()
             self.doMatch()
     #        self.generateResults()
             # self.cleanUp()
-        except Exception, e:
-            state_file = open(self.state_file_path, 'w')
-            state_file.write("1\n")
-            state_file.close()
-            self.manager.destroy()
-            raise e
+        #except Exception, e:
+         #   state_file = open(self.state_file_path, 'w')
+          #  state_file.write("1\n")
+           # state_file.close()
+           # self.manager.destroy()
+           # raise e
 
     def cleanUp(self):
         print "cleaning up"
@@ -434,6 +443,7 @@ class RateProducer:
         self.ch.basic_publish(exchange='jobs-cleanup-exchange', routing_key='', body=pickle.dumps(cleanup_dir))
 
     def submit(self, subtask):
+        self.heart_beat_lock.acquire()
         if subtask==None:
             return
         for fpath in subtask['files']:
@@ -441,6 +451,17 @@ class RateProducer:
             if not os.path.exists(fpath):
                 raise Exception("file does not exists: %s" % fpath)
         self.ch.basic_publish(exchange='', routing_key='jobs', body=pickle.dumps(subtask))
+        self.heart_beat_lock.release()
+
+    def make_heart_beat(self):
+# This method is just to let the server know we are alive
+      while True:
+        with self.heart_beat_lock:
+          self.conn.process_data_events()
+        print 'heart beat'
+        time.sleep(5)
+        if self.all_finished:
+          break
 
     def enrollCallBack(self, ch, method, properties, body):
         progress_part = 0.3
@@ -488,7 +509,6 @@ class RateProducer:
     def matchCallBack(self, ch, method, properties, body):
         with self.match_lock:
             result = pickle.loads(body)
-            self.finished_match_subtask_uuids.append(result['subtask_uuid'])
             ch.basic_ack(delivery_tag=method.delivery_tag)
             for rawResult in result['results']:
                 bxxid1 = self.uuid_bxx_table[rawResult['uuid1']]
@@ -512,6 +532,7 @@ class RateProducer:
                     except Exception, e:
 #                        print e
                         pass
+            self.finished_match_subtask_uuids.append(result['subtask_uuid'])
             print "match result [%s] finished [%d/%d=%d%%] failed [%d/%d]" % (result['subtask_uuid'][:8], len(self.finished_match_subtask_uuids), len(self.match_subtask_uuids), 100*len(self.finished_match_subtask_uuids)/len(self.match_subtask_uuids), self.failed_match_count, self.submitted_match_count)
             state_file = open(self.state_file_path, 'w')
             state_file.write("%f\n" % (0.3 + 0.7 * float(len(self.finished_match_subtask_uuids))/len(self.match_subtask_uuids)))
@@ -557,6 +578,7 @@ class RateProducer:
                 self.matchCallBack_cache_conn = getMemcacheConn(self.host)
             ch.basic_consume(self.matchCallBack, queue=self.match_result_qname)
             ch.start_consuming()
+            print "match_result_ch consumed"
         ch.queue_delete(queue=self.match_result_qname)
 
         self.match_result_file.close()
