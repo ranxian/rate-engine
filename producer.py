@@ -401,6 +401,7 @@ class RateProducer:
                 print "match workers finished before producer reach this line"
                 try:
                     self.match_result_ch.stop_consuming()
+                    print 'try to stop consuming'
                 except Exception, e:
                     print e
             self.submitting_match = False
@@ -577,6 +578,7 @@ class RateProducer:
             if USE_MEMCACHE:
                 self.matchCallBack_cache_conn = getMemcacheConn(self.host)
             ch.basic_consume(self.matchCallBack, queue=self.match_result_qname)
+            print 'match start consuming'
             ch.start_consuming()
             print "match_result_ch consumed"
         ch.queue_delete(queue=self.match_result_qname)
