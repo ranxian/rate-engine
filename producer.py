@@ -15,6 +15,7 @@ import uuid
 import ConfigParser
 from matchresult2bxx import matchresult2bxx
 from task_bitmap import BMManager
+import sys
 
 config = ConfigParser.ConfigParser()
 config.readfp(open('%s/producer.conf' % os.path.dirname(__file__), 'r'))
@@ -99,6 +100,9 @@ class RateProducer:
         self.match_result_file_path = "/".join((result_file_dir, 'match_result_bxx.txt'))
         self.all_finished = False
 
+
+        self.wa_first_result = True
+
     def submitEnrollBlock(self, l):
         subtask = self.genSubtask(l, 'enroll')
         files = []
@@ -178,6 +182,9 @@ class RateProducer:
               f.close()
 
         print 'See if enroll result exists'
+        os.system("tail -n +2 " + self.enroll_result_file_path + " > /tmp/tempenroll")
+        os.system("mv /tmp/tempenroll " + self.enroll_result_file_path)
+
         if not os.path.exists("/".join((self.result_file_dir, 'need_enroll'))) and os.path.exists(self.enroll_result_file_path):
             print 'previous enroll result exist, read from it'
             f = open(self.enroll_result_file_path, 'r')
@@ -196,11 +203,6 @@ class RateProducer:
                     self.failed_enroll_uuids.add(uuid)
                 self.enroll_uuids.add(uuid)
                 i += 1
-            # This is a workaround to a bug
-            self.finished_enroll_uuids.discard(lastid)
-            self.failed_enroll_uuids.discard(lastid)
-            self.enroll_uuids.discard(lastid)
-            i -= 1
             f.close()
         else:
             open(self.enroll_result_file_path, 'w').close()
@@ -233,6 +235,7 @@ class RateProducer:
         enrollf = open(self.uuid_table_file_path, 'r')
         with self.enroll_lock:
             enroll_result_thread = threading.Thread(target=self.waitForEnrollResults)
+            enroll_result_thread.daemon = True
             enroll_result_thread.start()
         wait = False
         while True:
@@ -328,6 +331,7 @@ class RateProducer:
         benchmarkf = open(self.benchmark_bxx_file_path, 'r')
         with self.match_lock:
             match_result_thread = threading.Thread(target=self.waitForMatchResults)
+            match_result_thread.daemon = True
             match_result_thread.start()
         wait = False
         while True:
@@ -393,6 +397,7 @@ class RateProducer:
                     if len(self.match_subtask_uuids)%10 == 0:
                         print "[%d*%d] matches has been submitted" % (len(self.match_subtask_uuids), MATCH_BLOCK_SIZE)
 
+        all_match_finished = False
         with self.match_lock:
             if len(l)!=0:
                 self.submitMatchBlock(l)
@@ -401,15 +406,16 @@ class RateProducer:
                 print "match workers finished before producer reach this line"
                 try:
                     self.match_result_ch.stop_consuming()
-                    print 'try to stop consuming'
                 except Exception, e:
+                    all_match_finished = True
                     print e
             self.submitting_match = False
         benchmarkf.close()
 
         print "%d matches" % self.submitted_match_count
         print "all matches submitted, waiting for all results"
-        match_result_thread.join()
+        if not all_match_finished:
+          match_result_thread.join()
         print "match finished, failed %d" % self.failed_match_count
         with self.heart_beat_lock:
           self.all_finished = True
@@ -419,8 +425,11 @@ class RateProducer:
             self.prepare()
             self.doEnroll()
             self.doMatch()
+            state_file = open(self.state_file_path, 'w')
+            state_file.write("1\n")
+            state_file.close()
     #        self.generateResults()
-            # self.cleanUp()
+            self.cleanUp()
         #except Exception, e:
          #   state_file = open(self.state_file_path, 'w')
           #  state_file.write("1\n")
