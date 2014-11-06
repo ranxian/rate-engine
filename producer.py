@@ -37,6 +37,7 @@ MATCH_BLOCK_SIZE = config.getint('rate-server', 'MATCH_BLOCK_SIZE')
 PRODUCER_RATE_ROOT = config.get('rate-server', 'PRODUCER_RATE_ROOT')
 MAX_WORKING_ENROLL_SUBTASKS = config.getint('rate-server', 'MAX_WORKING_ENROLL_SUBTASKS')
 MAX_WORKING_MATCH_SUBTASKS = config.getint('rate-server', 'MAX_WORKING_MATCH_SUBTASKS')
+IGNORE_MATCH = config.getint('rate-server', 'IGNORE_MATCH')
 
 def formMatchKey(algorithm_version_uuid, u1, u2):
     u1 = u1.replace('-', '').lower()
@@ -182,10 +183,10 @@ class RateProducer:
               f.close()
 
         print 'See if enroll result exists'
-        os.system("tail -n +2 " + self.enroll_result_file_path + " > /tmp/tempenroll")
-        os.system("mv /tmp/tempenroll " + self.enroll_result_file_path)
 
         if not os.path.exists("/".join((self.result_file_dir, 'need_enroll'))) and os.path.exists(self.enroll_result_file_path):
+            os.system("tail -n +2 " + self.enroll_result_file_path + " > /tmp/tempenroll")
+            os.system("mv /tmp/tempenroll " + self.enroll_result_file_path)
             print 'previous enroll result exist, read from it'
             f = open(self.enroll_result_file_path, 'r')
             i = 0
@@ -209,6 +210,7 @@ class RateProducer:
             if os.path.exists(self.result_file_dir + '/' + 'need_enroll'):
               os.remove('/'.join((self.result_file_dir, 'need_enroll')))
         self.enroll_result_file = open(self.enroll_result_file_path, 'a')
+        print 'already', len(self.finished_enroll_uuids), 'enrolled'
 
         print 'Create match result file if needed'
         if not os.path.exists(self.match_result_file_path):
@@ -344,14 +346,16 @@ class RateProducer:
                     print "%d match queue full, wait for 5 sec" % (working_match_subtasks, )
                     wait = True
                     continue
-
                 i = i+1
-                if i%100000==0:
-                    print "%d matches proceeded" % (i,)
 
                 a = benchmarkf.readline() # 11 22 I
                 if len(a)==0:
                     break
+
+                if i%100000==0:
+                    print "%d matches proceeded" % (i,)
+                if i < IGNORE_MATCH:
+                  continue
                 (bxx1, bxx2, gOrI) = a.strip().split(' ')[:3]
                 u1 = self.bxx_uuid_table[bxx1]
                 u2 = self.bxx_uuid_table[bxx2]
