@@ -522,8 +522,11 @@ class RateProducer:
 
     def matchCallBack(self, ch, method, properties, body):
         with self.match_lock:
+            print('loads body')
             result = pickle.loads(body)
+            print('basic_ack')
             ch.basic_ack(delivery_tag=method.delivery_tag)
+            print('write result')
             for rawResult in result['results']:
                 bxxid1 = self.uuid_bxx_table[rawResult['uuid1']]
                 bxxid2 = self.uuid_bxx_table[rawResult['uuid2']]
@@ -548,10 +551,12 @@ class RateProducer:
                         pass
             self.finished_match_subtask_uuids.append(result['subtask_uuid'])
             print "match result [%s] finished [%d/%d=%d%%] failed [%d/%d]" % (result['subtask_uuid'][:8], len(self.finished_match_subtask_uuids), len(self.match_subtask_uuids), 100*len(self.finished_match_subtask_uuids)/len(self.match_subtask_uuids), self.failed_match_count, self.submitted_match_count)
+            print 'write status'
             state_file = open(self.state_file_path, 'w')
             state_file.write("%f\n" % (0.3 + 0.7 * float(len(self.finished_match_subtask_uuids))/len(self.match_subtask_uuids)))
             state_file.close()
 
+            print 'flush status'
             self.match_result_file.flush()
             if (not self.submitting_match) and len(self.finished_match_subtask_uuids)==len(self.match_subtask_uuids):
                 ch.stop_consuming()
