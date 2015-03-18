@@ -18,7 +18,7 @@ from task_bitmap import BMManager
 import sys
 
 config = ConfigParser.ConfigParser()
-config.readfp(open('%s/producer.conf' % os.path.dirname(__file__), 'r'))
+config.readfp(open('%s/producer.conf' % os.path.dirname(os.path.realpath(__file__)), 'r'))
 
 #TODO cache the templates only when the template is small
 USE_MEMCACHE = config.getint('rate-server', 'USE_MEMCACHE')
@@ -73,7 +73,7 @@ class RateProducer:
 
         self.already_match_number = 0
 #        self.conn = TornadoConnection(pika.ConnectionParameters(host))
-        self.conn = pika.BlockingConnection(pika.ConnectionParameters(self.host,2013))
+        self.conn = pika.BlockingConnection(pika.ConnectionParameters(self.host))
         self.ch = self.conn.channel()
         print "queue server connected"
         self.results = {}
@@ -563,7 +563,7 @@ class RateProducer:
 
     def waitForEnrollResults(self):
         print 'waiting for enroll results'
-        conn = pika.BlockingConnection(pika.ConnectionParameters(self.host, 2013))
+        conn = pika.BlockingConnection(pika.ConnectionParameters(self.host))
         ch = conn.channel()
         self.enroll_result_ch = ch
         ch.queue_declare(queue=self.enroll_result_qname, durable=False, exclusive=False, auto_delete=False)
@@ -586,7 +586,7 @@ class RateProducer:
 
     def waitForMatchResults(self):
         print 'waiting for match results'
-        conn = pika.BlockingConnection(pika.ConnectionParameters(self.host,2013))
+        conn = pika.BlockingConnection(pika.ConnectionParameters(self.host))
         ch = conn.channel()
         self.match_result_ch = ch
         ch.queue_declare(queue=self.match_result_qname, durable=False, exclusive=False, auto_delete=False)
