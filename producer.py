@@ -1,4 +1,7 @@
 #coding:utf8
+# RATE-engine 评测机
+# 利用这个脚本可以生成 windows 下可运行的 exe 文件
+
 import base64
 import re
 import json

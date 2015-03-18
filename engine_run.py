@@ -7,10 +7,9 @@ import traceback
 
 if __name__=='__main__':
     usage = """
-    %s host benchmark_dir result_dir algorithm_version_dir timelimit memlimit
+    %s host benchmark_uuid result_dir algorithm_uuid timelimit memlimit
     host is the host where queue server is on
-    benchmark and result can be absolute or releative path
-    algorithm_version_dir must be relative path from RATE_ROOT (i.e. algorithms/algorithm-uuid/version-uuid)
+    result_dir can be absolute or releative path
     timelimit in ms
     memlimit in byte
     """ % (sys.argv[0])
@@ -19,7 +18,7 @@ if __name__=='__main__':
         exit()
 
     try:
-        benchmark_dir = sys.argv[2]
+        benchmark_dir = 'benchmarks' + '/' +  sys.argv[2]
 
         benchmark_bxx_file = "/".join((benchmark_dir, "benchmark_bxx.txt"))
         uuid_table_file = "/".join((benchmark_dir, "uuid_table.txt"))
