@@ -1,6 +1,5 @@
 #coding:utf8
 # RATE-engine 评测机
-# 利用这个脚本可以生成 windows 下可运行的 exe 文件
 
 import base64
 import re
@@ -14,7 +13,7 @@ import os
 import pika
 import pickle
 import time
-import uuid
+from uuid import uuid4
 import ConfigParser
 from matchresult2bxx import matchresult2bxx
 from task_bitmap import BMManager
@@ -23,72 +22,60 @@ import sys
 config = ConfigParser.ConfigParser()
 config.readfp(open('%s/producer.conf' % os.path.dirname(os.path.realpath(__file__)), 'r'))
 
-#TODO cache the templates only when the template is small
-USE_MEMCACHE = config.getint('rate-server', 'USE_MEMCACHE')
-if USE_MEMCACHE:
-    import memcache
-    memcache_hosts = ['localhost:11211', ]#'162.105.30.164:11211']
-
-def getMemcacheConn(host):
-#    return None
-    # FIXME it's a temp work around
-    return memcache.Client(memcache_hosts, debug=0)
-#    return memcache.Client(["%s:11211" % host,], debug=0)
-
 ENROLL_BLOCK_SIZE = config.getint('rate-server', 'ENROLL_BLOCK_SIZE')
 MATCH_BLOCK_SIZE = config.getint('rate-server', 'MATCH_BLOCK_SIZE')
-PRODUCER_RATE_ROOT = config.get('rate-server', 'PRODUCER_RATE_ROOT')
+RATE_ROOT = config.get('rate-server', 'RATE_ROOT')
 MAX_WORKING_ENROLL_SUBTASKS = config.getint('rate-server', 'MAX_WORKING_ENROLL_SUBTASKS')
 MAX_WORKING_MATCH_SUBTASKS = config.getint('rate-server', 'MAX_WORKING_MATCH_SUBTASKS')
-IGNORE_MATCH = config.getint('rate-server', 'IGNORE_MATCH')
 
-def formMatchKey(algorithm_version_uuid, u1, u2):
+# 生成给 rabbitmq 用的 match 运算的 key
+def formMatchKey(algorithm_uuid, u1, u2):
     u1 = u1.replace('-', '').lower()
     u2 = u2.replace('-', '').lower()
     if u1>u2:
         t = u1
         u1 = u2
         u2 = t
-    algorithm_version_uuid = algorithm_version_uuid.replace('-', '').lower()
-    return "m#%s#%s#%s" % (algorithm_version_uuid[-12:], u1[-12:], u2[-12:])
+    algorithm_uuid = algorithm_uuid.replace('-', '').lower()
+    return "m#%s#%s#%s" % (algorithm_uuid[-12:], u1[-12:], u2[-12:])
 
-def formEnrollKey(algorithm_version_uuid, u):
-    return "e#%s#%s" % (algorithm_version_uuid[-12:], u[-12:])
+# 生成给 rabbitmq 用的 enroll 运算的 key
+def formEnrollKey(algorithm_uuid, u):
+    return "e#%s#%s" % (algorithm_uuid[-12:], u[-12:])
 
 class RateProducer:
-    def __init__(self, host, benchmark_file_dir, result_file_dir, algorithm_version_dir, timelimit, memlimit):
-        self.host = host
-        self.benchmark_file_dir = benchmark_file_dir
+    def __init__(self, benchmark_uuid, result_file_dir, algorithm_uuid, timelimit, memlimit):
+        # 准备各种变量
+        benchmark_dir = "/".join((RATE_ROOT, 'benchmarks', benchmark_uuid))
+        algorithm_dir = "/".join(('algorithms', algorithm_uuid))
+        self.host = config.get('rate-server', 'RABBITMQ_HOST')
+        self.benchmark_dir = benchmark_dir
         self.result_file_dir = result_file_dir
-        self.benchmark_bxx_file_path = "/".join((benchmark_file_dir, 'benchmark_bxx.txt'))
-        self.uuid_table_file_path = "/".join((benchmark_file_dir, 'uuid_table.txt'))
+        if not os.path.isdir(result_file_dir):
+            os.makedirs(result_file_dir)
+        self.benchmark_bxx_file_path = "/".join((benchmark_dir, 'benchmark_bxx.txt'))
+        self.uuid_table_file_path = "/".join((benchmark_dir, 'uuid_table.txt'))
         self.uuid_bxx_table = {}
         self.bxx_uuid_table = {}
-        self.enrollEXE = "/".join((algorithm_version_dir, 'enroll.exe')).replace('\\', '/')
-        self.enrollEXEUUID = [ v for v in self.enrollEXE.split('/') if v!="" ][-2].replace('-', '')
-        self.matchEXE = "/".join((algorithm_version_dir, 'match.exe')).replace('\\','/')
-        self.matchEXEUUID = [ v for v in self.matchEXE.split('/') if v!="" ][-2].replace('-','')
+        self.enrollEXE = "/".join((algorithm_dir, 'enroll.exe'))
+        self.matchEXE = "/".join((algorithm_dir, 'match.exe'))
         self.timelimit = timelimit
         self.memlimit = memlimit
-        self.ongoing_file_path = "/".join((result_file_dir, 'task.ongoing'))
-        self.bmf_path = "/".join((result_file_dir, 'task.bm'))
-        self.state_file_path = "/".join((result_file_dir, "state.txt"))
+
+        self.ongoing_file_path = "/".join((result_file_dir, 'ongoing.json'))
+        self.enroll_result_file_path = "/".join((result_file_dir, 'enroll_result.txt'))
+        self.match_result_file_path = "/".join((result_file_dir, 'match_result_bxx.txt'))
 
         self.already_match_number = 0
-#        self.conn = TornadoConnection(pika.ConnectionParameters(host))
-        self.conn = pika.BlockingConnection(pika.ConnectionParameters(self.host))
-        self.ch = self.conn.channel()
-        print "queue server connected"
+        self.all_finished = False
+
         self.results = {}
-        self.uuid = self.get_uuid()
+        self.uuid = ""
         self.enroll_subtask_uuids = []
         self.match_subtask_uuids = []
         self.finished_enroll_subtask_uuids = []
         self.finished_match_subtask_uuids = []
-        if not os.path.isdir(result_file_dir):
-            os.makedirs(result_file_dir)
         self.finished_enroll_uuids = set()
-#        self.finished_match_uuids = set()
         self.failed_enroll_uuids = set()
         self.failed_match_uuids = set()
         self.submitting_enroll = False
@@ -100,13 +87,28 @@ class RateProducer:
         self.match_result_qname = 'results-match-%s' % (self.uuid,)
         self.enroll_uuids = set()
 
-        self.enroll_result_file_path = "/".join((result_file_dir, 'enroll_result.txt'))
-        self.match_result_file_path = "/".join((result_file_dir, 'match_result_bxx.txt'))
-        self.all_finished = False
+        # 连接 rmq 服务器
+        self.conn = pika.BlockingConnection(pika.ConnectionParameters(self.host))
+        self.ch = self.conn.channel()
+        print "queue server connected"
 
+        self.prepare()
 
-        self.wa_first_result = True
+    # 记录任务中间状态
+    def dump_onging(self):
+        information = {
+            "task_uuid": self.uuid
+        }
+        with open(self.ongoing_file_path, 'w') as f:
+            f.write(json.dumps(information))
 
+    # 读取任务中间状态
+    def load_ongoing(self):
+        with open(self.ongoing_file_path, 'r') as f:
+            information = json.load(f)
+            self.uuid = information["task_uuid"]
+
+    # 提交 enroll 任务
     def submitEnrollBlock(self, l):
         subtask = self.genSubtask(l, 'enroll')
         files = []
@@ -118,6 +120,7 @@ class RateProducer:
         self.enroll_subtask_uuids.append(subtask['subtask_uuid'])
         self.submit(subtask)
 
+    # 提交 match 任务
     def submitMatchBlock(self, l):
         subtask = self.genSubtask(l, 'match')
         files = []
@@ -130,6 +133,7 @@ class RateProducer:
         self.match_subtask_uuids.append(subtask['subtask_uuid'])
         self.submit(subtask)
 
+    # 生成小任务 - 一个个的 match 或者 enroll 任务
     def genSubtask(self, tinytasks, taskType):
         subtask = {
                 'timelimit'     : self.timelimit,
@@ -140,103 +144,52 @@ class RateProducer:
                 'matchEXE'      : self.matchEXE,
                 'type'          : taskType,
                }
-        subtask_uuid = uuid.uuid4().__str__()
+        subtask_uuid = uuid4().__str__()
         subtask['subtask_uuid'] = subtask_uuid
         return subtask
 
-    def get_uuid(self):
-        uuid_ = uuid.uuid4().__str__()
-        print 'Check ongoing_file_path'
-        if os.path.exists(self.ongoing_file_path):
-            print 'ongoing_file exists, read uuid from it'
-            f = open(self.ongoing_file_path, 'r')
-            uuid_ = f.readline().rstrip("\n")
-            f.close()
-        return uuid_
-
+    # 准备
+    # 初始化及恢复中间结果
     def prepare(self):
         print "preparing queues"
         self.ch.queue_declare(queue='jobs', durable=False, exclusive=False, auto_delete=False)
 
-        print "Init BMManager"
-        nline = 0
-        uuid_table_f = open(self.uuid_table_file_path, 'r')
-        while True:
-            line = uuid_table_f.readline()
-            if line == '' or line == "\n":
-                break
-            nline += 1
-        uuid_table_f.close()
-        self.manager = BMManager(self.bmf_path, nline)
-        print 'Inited with %d samples' % (nline)
-
-        # prepare dirs
-        print "preparing dirs on server"
-        if not os.path.exists(self.result_file_dir + '/' + 'need_enroll') and os.path.exists(self.ongoing_file_path):
-            print 'ongoing_file exists, no need to prepare dir'
-        elif not os.path.exists('/'.join((PRODUCER_RATE_ROOT, 'temp', self.uuid[-12:]))):
-            os.makedirs("/".join((PRODUCER_RATE_ROOT, 'temp', self.uuid[-12:])))
-            for i in range(16*16):
-                tdir = str(hex(i+256))[-2:]
-                os.mkdir("/".join((PRODUCER_RATE_ROOT, 'temp', self.uuid[-12:], tdir)))
-            if not os.path.exists(self.ongoing_file_path):
-              print 'no ongoing_file, create and write uuid to it'
-              f = open(self.ongoing_file_path, 'w')
-              f.write(self.uuid + '\n')
-              f.close()
-
-        print 'See if enroll result exists'
-
-        if not os.path.exists("/".join((self.result_file_dir, 'need_enroll'))) and os.path.exists(self.enroll_result_file_path):
-            os.system("tail -n +2 " + self.enroll_result_file_path + " > /tmp/tempenroll")
-            os.system("mv /tmp/tempenroll " + self.enroll_result_file_path)
-            print 'previous enroll result exist, read from it'
-            f = open(self.enroll_result_file_path, 'r')
-            i = 0
-            lastid = None
-            while True:
-                line = f.readline()
-                if line == '' or line == "\n":
-                    break
-                line = line.rstrip("\n")
-                uuid, result = line.split(' ')
-                lastid = uuid
-                if result == 'ok':
-                    self.finished_enroll_uuids.add(uuid)
-                else:
-                    self.failed_enroll_uuids.add(uuid)
-                self.enroll_uuids.add(uuid)
-                i += 1
-            f.close()
+        # 初始化或恢复任务日志文件
+        if os.path.exists(self.ongoing_file_path):
+            print 'restore from last run'
+            self.load_ongoing()
+            self.enroll_result_file = open(self.enroll_result_file_path, 'a')
+            self.match_result_file = open(self.match_result_file_path, 'a')
         else:
-            open(self.enroll_result_file_path, 'w').close()
-            if os.path.exists(self.result_file_dir + '/' + 'need_enroll'):
-              os.remove('/'.join((self.result_file_dir, 'need_enroll')))
-        self.enroll_result_file = open(self.enroll_result_file_path, 'a')
-        print 'already', len(self.finished_enroll_uuids), 'enrolled'
-
-        print 'Create match result file if needed'
-        if not os.path.exists(self.match_result_file_path):
+            print 'preparing dirs on server'
+            # 生成 uuid
+            self.uuid = uuid4().__str__()
+            # 生成 match|enroll result file
             open(self.match_result_file_path, 'w').close()
-        self.match_result_file = open(self.match_result_file_path, 'a')
+            open(self.enroll_result_file_path, 'w').close()
+            self.enroll_result_file = open(self.enroll_result_file_path, 'a')
+            self.match_result_file = open(self.match_result_file_path, 'a')
+            if not os.path.exists('/'.join((RATE_ROOT, 'temp', self.uuid[-12:]))):
+                os.makedirs("/".join((RATE_ROOT, 'temp', self.uuid[-12:])))
+                for i in range(16*16):
+                    tdir = str(hex(i+256))[-2:]
+                    os.mkdir("/".join((RATE_ROOT, 'temp', self.uuid[-12:], tdir)))
+            self.dump_onging()
 
-        # prepare heart beat thread
+        # 心跳线程
         hbt = threading.Thread(target=self.make_heart_beat)
+        hbt.daemon = True
         hbt.start()
-        print 'Start heart beat thread'
-
-        print "prepare finished"
+        print 'start heart beat thread'
+        print "-- prepare finished"
 
     def doEnroll(self):
-        if USE_MEMCACHE:
-            self.enroll_cache_conn = getMemcacheConn(self.host)
-
         lines_proceeded = 0
 
         self.submitting_enroll = True
         i = 0 # i j is for counting in case to print messages with i%xxx=0
         j = 0
-        l = []
+        enroll_block = []
         enrollf = open(self.uuid_table_file_path, 'r')
         with self.enroll_lock:
             enroll_result_thread = threading.Thread(target=self.waitForEnrollResults)
@@ -262,48 +215,28 @@ class RateProducer:
                 if len(a)==0:
                     break
 
+                # bxxid, uuid, sample 文件地址
                 (bxx, u, f) = a.strip().split(' ')
                 f = "/".join(('samples', f))
 
                 if u not in self.uuid_bxx_table:
                     self.uuid_bxx_table[u] = bxx
                     self.bxx_uuid_table[bxx] = u
-
-                if u not in self.enroll_uuids:
-                    if USE_MEMCACHE:
-                        cache_key = formEnrollKey(self.enrollEXEUUID, u)
-                        cache_value = None
-                        try:
-                            cache_value = json.loads(self.enroll_cache_conn.get(cache_key))
-                            if cache_value[0]=='ok':
-                                dest_file = open("/".join((PRODUCER_RATE_ROOT, "temp", self.uuid[-12:], u[-12:-10], u[-10:]+".t")), 'wb')
-                                template = base64.b64decode(cache_value[1])
-                                dest_file.write(template)
-                                dest_file.close()
-                                print>>self.enroll_result_file, '%s ok' % u
-                            elif cache_value[0]=='failed':
-                                self.failed_enroll_uuids.add(u)
-                                print>>self.enroll_result_file, '%s failed' % u
-                            continue
-                        except Exception, e:
-#                            print e
-                            pass
-
                     self.enroll_uuids.add(u)
                     t = {'uuid':u, 'file': f }
                     #print>>enroll_log_file, u, f
-                    l.append(t)
-                    if len(l)==ENROLL_BLOCK_SIZE:
-                        self.submitEnrollBlock(l)
-                        l = []
+                    enroll_block.append(t)
+                    if len(enroll_block) == ENROLL_BLOCK_SIZE:
+                        self.submitEnrollBlock(enroll_block)
+                        enroll_block = []
                         j = j+1
                         if j%10 == 0:
                             print "[%d*%d=%d] enrolls has been submitted" % (j, ENROLL_BLOCK_SIZE, j * ENROLL_BLOCK_SIZE)
 
         with self.enroll_lock:
             if len(l)!=0:
-                self.submitEnrollBlock(l)
-                l = []
+                self.submitEnrollBlock(enroll_block)
+                enroll_block = []
                 enrollf.close()
                 #enroll_log_file.close()
             if len(self.finished_enroll_subtask_uuids)==len(self.enroll_subtask_uuids):
@@ -320,14 +253,11 @@ class RateProducer:
 
         print "%d enrolls" % len(self.enroll_uuids)
         print "all enrolls submitted, waiting for all results"
-        enroll_result_thread.join()
         print 'wait for another 5 secs for enroll result to be tranferred'
         time.sleep(5)
         print "enroll finished, failed %d" % len(self.failed_enroll_uuids)
 
     def doMatch(self):
-        if USE_MEMCACHE:
-            self.match_cache_conn = getMemcacheConn(self.host)
         self.submitting_match = True
         l = []
         i = 0
@@ -357,32 +287,10 @@ class RateProducer:
 
                 if i%100000==0:
                     print "%d matches proceeded" % (i,)
-                if i < IGNORE_MATCH:
-                  continue
+
                 (bxx1, bxx2, gOrI) = a.strip().split(' ')[:3]
                 u1 = self.bxx_uuid_table[bxx1]
                 u2 = self.bxx_uuid_table[bxx2]
-
-                if USE_MEMCACHE:
-                    # check if the match has already been in cache
-                    # if so, output the result and continue
-                    cache_key = formMatchKey(self.matchEXEUUID, u1, u2)
-                    cache_value = None
-#                    print cache_key
-                    try:
-                        cache_value = json.loads(self.match_cache_conn.get(cache_key))
-                    except Exception, e:
-#                        print e
-                        pass
-#                    print cache_value
-#                    print type(cache_value)
-                    if cache_value!=None:
-                        if cache_value[0]=='ok':
-                            print>>self.match_result_file, '%s %s %s ok %s' % (u1, u2, cache_value[1], cache_value[2])
-                        elif cache_value[0]=='failed':
-                            print>>self.match_result_file, '%s %s %s failed' % (u1, u2, cache_value[1])
-#                        self.match_result_file.flush()
-                        continue
 
                 # Check bitmap file
                 if self.manager.query_line(a) == 1:
@@ -428,7 +336,7 @@ class RateProducer:
           self.all_finished = True
 
     def solve(self):
-        #try:
+        try:
             self.prepare()
             self.doEnroll()
             self.doMatch()
@@ -437,21 +345,16 @@ class RateProducer:
             state_file.close()
     #        self.generateResults()
             self.cleanUp()
-        #except Exception, e:
-         #   state_file = open(self.state_file_path, 'w')
-          #  state_file.write("1\n")
-           # state_file.close()
-           # self.manager.destroy()
-           # raise e
+        except Exception, e:
+            print e
+
 
     def cleanUp(self):
         print "cleaning up"
         try:
-            temp_dir = "/".join((PRODUCER_RATE_ROOT, 'temp', self.uuid[-12:]))
+            temp_dir = "/".join((RATE_ROOT, 'temp', self.uuid[-12:]))
             if os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir)
-            need_enroll_path = "/".join((self.result_file_dir, 'need_enroll'))
-            open(need_enroll_path, 'w').close()
         except Exception, e:
             print e
 
@@ -464,7 +367,7 @@ class RateProducer:
         if subtask==None:
             return
         for fpath in subtask['files']:
-            fpath = "/".join((PRODUCER_RATE_ROOT, fpath))
+            fpath = "/".join((RATE_ROOT, fpath))
             if not os.path.exists(fpath):
                 raise Exception("file does not exists: %s" % fpath)
         self.ch.basic_publish(exchange='', routing_key='jobs', body=pickle.dumps(subtask))
@@ -501,24 +404,6 @@ class RateProducer:
             state_file.close()
 #            self.enroll_result_file.flush()
 
-            if USE_MEMCACHE:
-                for rawResult in result['results']:
-                    try:
-                        cache_value = [rawResult['result'], ]
-                        if rawResult['result']=='ok':
-                            u = rawResult['uuid']
-                            template_file = open("/".join((PRODUCER_RATE_ROOT, "temp", self.uuid[-12:], u[-12:-10], u[-10:]+".t")), 'rb')
-                            template = template_file.read()
-                            template_file.close()
-                            template = base64.b64encode(template)
-                            cache_value.append(template)
-                        elif rawResult['result']=='failed':
-                            pass
-                        self.enrollCallBack_cache_conn.set(formEnrollKey(self.enrollEXEUUID, rawResult['uuid']), json.dumps(cache_value))
-                    except Exception, e:
-#                        print e
-                        continue
-
             if (not self.submitting_enroll) and len(self.finished_enroll_subtask_uuids)==len(self.enroll_subtask_uuids):
                 print "enrollCallBack stop consuming"
                 ch.stop_consuming()
@@ -536,22 +421,7 @@ class RateProducer:
                 # Add match result to bitmap
                 aline = '%s %s' % (bxxid1, bxxid2)
                 self.manager.update_bitmap([aline])
-                if USE_MEMCACHE:
-                    cache_value = [rawResult['result'], rawResult['match_type']]
-                if rawResult['result'] == 'ok':
-                    print>>self.match_result_file, '%s %s %s ok %s' % (bxxid1, bxxid2, rawResult['match_type'], rawResult['score'])
-                    if USE_MEMCACHE:
-                        cache_value.append(rawResult['score'])
-                elif rawResult['result'] == 'failed':
-                    print>>self.match_result_file, '%s %s %s failed' % (bxxid1, bxxid2, rawResult['match_type'])
-                    self.failed_match_count += 1
-                if USE_MEMCACHE:
-                    try:
-                        cache_key = formMatchKey(self.matchEXEUUID, bxxid1, bxxid2)
-                        self.matchCallBack_cache_conn.set(cache_key, json.dumps(cache_value))
-                    except Exception, e:
-#                        print e
-                        pass
+
             self.finished_match_subtask_uuids.append(result['subtask_uuid'])
             print "match result [%s] finished [%d/%d=%d%%] failed [%d/%d]" % (result['subtask_uuid'][:8], len(self.finished_match_subtask_uuids), len(self.match_subtask_uuids), 100*len(self.finished_match_subtask_uuids)/len(self.match_subtask_uuids), self.failed_match_count, self.submitted_match_count)
             print 'write status'
@@ -578,8 +448,7 @@ class RateProducer:
             print self.submitting_enroll
             print len(self.finished_enroll_subtask_uuids)
             print len(self.enroll_subtask_uuids)
-            if USE_MEMCACHE:
-                self.enrollCallBack_cache_conn = getMemcacheConn(self.host)
+
             ch.basic_consume(self.enrollCallBack, queue=self.enroll_result_qname)
             print 'start_consuming'
             ch.start_consuming()
@@ -596,8 +465,6 @@ class RateProducer:
         if (not self.submitting_match) and len(self.finished_match_subtask_uuids)==len(self.match_subtask_uuids):
             pass
         else:
-            if USE_MEMCACHE:
-                self.matchCallBack_cache_conn = getMemcacheConn(self.host)
             ch.basic_consume(self.matchCallBack, queue=self.match_result_qname)
             print 'match start consuming'
             ch.start_consuming()
@@ -606,5 +473,29 @@ class RateProducer:
 
         self.match_result_file.close()
 
-        # matchresult2bxx(self.benchmark_file_dir, self.result_file_dir)
+        # matchresult2bxx(self.benchmark_dir, self.result_file_dir)
 #        conn.close()
+
+if __name__=='__main__':
+    usage = """Usage:
+    python %s benchmark_uuid result_dir algorithm_uuid timelimit memlimit
+    host is the host where queue server is on
+    result_dir can be absolute or releative path
+    timelimit in ms
+    memlimit in byte
+    """ % (sys.argv[0])
+    if len(sys.argv)!=6:
+        print usage
+        exit()
+
+    try:
+        p = RateProducer(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5])
+        p.solve()
+        while True:
+            if p.all_finished:
+                break
+        print 'ok'
+    except Exception, e:
+        print e
+    except KeyboardInterrupt, e:
+        print e
