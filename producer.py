@@ -425,7 +425,7 @@ class RateProducer:
           self.all_finished = True
 
     def solve(self):
-        #try:
+        try:
             self.prepare()
             self.doEnroll()
             self.doMatch()
@@ -434,12 +434,12 @@ class RateProducer:
             state_file.close()
     #        self.generateResults()
             self.cleanUp()
-        #except Exception, e:
-         #   state_file = open(self.state_file_path, 'w')
-          #  state_file.write("1\n")
-           # state_file.close()
-           # self.manager.destroy()
-           # raise e
+        except Exception, e:
+            state_file = open(self.state_file_path, 'w')
+            state_file.write("1\n")
+            state_file.close()
+            self.manager.destroy()
+            raise e
 
     def cleanUp(self):
         print "cleaning up"
