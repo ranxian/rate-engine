@@ -387,5 +387,5 @@ if __name__=='__main__':
         t = Process(target=proc, args=process_args)
         t.start()
         ts.append(t)
-    for t in ts:
-        t.join()
+
+    while True:

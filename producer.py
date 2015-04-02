@@ -1,5 +1,5 @@
 #coding:utf8
-# RATE-engine 评测机
+# RATE-engine 评测任务生产者
 
 import base64
 import re
@@ -62,7 +62,7 @@ class RateProducer:
         self.timelimit = timelimit
         self.memlimit = memlimit
 
-        self.ongoing_file_path = "/".join((result_file_dir, 'ongoing.json'))
+        self.log_file_path = "/".join((result_file_dir, 'log.json'))
         self.enroll_result_file_path = "/".join((result_file_dir, 'enroll_result.txt'))
         self.match_result_file_path = "/".join((result_file_dir, 'match_result_bxx.txt'))
 
@@ -71,7 +71,11 @@ class RateProducer:
 
         self.results = {}
         self.uuid = ""
-        self.enroll_subtask_uuids = []
+        self.enroll_tasks_state = {}
+        self.match_tasks_state = {}
+        self.working_task_uuids = {}
+
+        self.enroll_subtask_uuis = []
         self.match_subtask_uuids = []
         self.finished_enroll_subtask_uuids = []
         self.finished_match_subtask_uuids = []
@@ -92,19 +96,17 @@ class RateProducer:
         self.ch = self.conn.channel()
         print "queue server connected"
 
-        self.prepare()
-
     # 记录任务中间状态
-    def dump_onging(self):
+    def dump_log(self):
         information = {
             "task_uuid": self.uuid
         }
-        with open(self.ongoing_file_path, 'w') as f:
+        with open(self.log_file_path, 'w') as f:
             f.write(json.dumps(information))
 
     # 读取任务中间状态
-    def load_ongoing(self):
-        with open(self.ongoing_file_path, 'r') as f:
+    def load_log(self):
+        with open(self.log_file_path, 'r') as f:
             information = json.load(f)
             self.uuid = information["task_uuid"]
 
@@ -117,7 +119,6 @@ class RateProducer:
         for i in l:
             files.append(i['file'])
         subtask['files'] = files
-        self.enroll_subtask_uuids.append(subtask['subtask_uuid'])
         self.submit(subtask)
 
     # 提交 match 任务
@@ -134,7 +135,7 @@ class RateProducer:
         self.submit(subtask)
 
     # 生成小任务 - 一个个的 match 或者 enroll 任务
-    def genSubtask(self, tinytasks, taskType):
+    def genSubtask(self, tinytasks, taskType, reGen=False):
         subtask = {
                 'timelimit'     : self.timelimit,
                 'memlimit'      : self.memlimit,
@@ -144,24 +145,25 @@ class RateProducer:
                 'matchEXE'      : self.matchEXE,
                 'type'          : taskType,
                }
-        subtask_uuid = uuid4().__str__()
-        subtask['subtask_uuid'] = subtask_uuid
+        if not reGen:
+            subtask[len(sell.enroll_tasks_state)] = False
         return subtask
 
     # 准备
     # 初始化及恢复中间结果
     def prepare(self):
-        print "preparing queues"
+        print "[PREPARING] preparing queues"
         self.ch.queue_declare(queue='jobs', durable=False, exclusive=False, auto_delete=False)
 
-        # 初始化或恢复任务日志文件
-        if os.path.exists(self.ongoing_file_path):
-            print 'restore from last run'
-            self.load_ongoing()
+        # 尝试恢复任务日志文件
+        if os.path.exists(self.log_file_path):
+            print '[PREPARING] restore from last run'
+            self.load_log()
             self.enroll_result_file = open(self.enroll_result_file_path, 'a')
             self.match_result_file = open(self.match_result_file_path, 'a')
+        # 初始化
         else:
-            print 'preparing dirs on server'
+            print '[PREPARING] '
             # 生成 uuid
             self.uuid = uuid4().__str__()
             # 生成 match|enroll result file
@@ -174,16 +176,18 @@ class RateProducer:
                 for i in range(16*16):
                     tdir = str(hex(i+256))[-2:]
                     os.mkdir("/".join((RATE_ROOT, 'temp', self.uuid[-12:], tdir)))
-            self.dump_onging()
+            # 生成日志文件
+            self.dump_log()
 
         # 心跳线程
         hbt = threading.Thread(target=self.make_heart_beat)
         hbt.daemon = True
         hbt.start()
-        print 'start heart beat thread'
-        print "-- prepare finished"
+        print '[PREPARING] start heart beat thread'
+        print "[PREPARING] -- prepare finished"
 
     def doEnroll(self):
+        print '[ENROLL] begin enroll'
         lines_proceeded = 0
 
         self.submitting_enroll = True
@@ -202,14 +206,15 @@ class RateProducer:
                 wait = False
             with self.enroll_lock:
                 working_enroll_subtasks = len(self.enroll_subtask_uuids)-len(self.finished_enroll_subtask_uuids)
+
                 if working_enroll_subtasks >= MAX_WORKING_ENROLL_SUBTASKS:
-                    print "%d enroll queue full, wait for 1 min" % (working_enroll_subtasks, )
+                    print "[ENROLL] %d enroll queue full, wait for 1 min" % (working_enroll_subtasks, )
                     wait = True
                     continue
                 a = enrollf.readline()
                 lines_proceeded += 1
                 if lines_proceeded%1000==0:
-                    print "%d enrolls proceeded" % lines_proceeded
+                    print "[ENROLL] %d enrolls proceeded" % lines_proceeded
                     pass
 
                 if len(a)==0:
@@ -231,31 +236,30 @@ class RateProducer:
                         enroll_block = []
                         j = j+1
                         if j%10 == 0:
-                            print "[%d*%d=%d] enrolls has been submitted" % (j, ENROLL_BLOCK_SIZE, j * ENROLL_BLOCK_SIZE)
+                            print "[ENROLL] [%d*%d=%d] enrolls has been submitted" % (j, ENROLL_BLOCK_SIZE, j * ENROLL_BLOCK_SIZE)
 
         with self.enroll_lock:
-            if len(l)!=0:
+            if len(enroll_block)!=0:
                 self.submitEnrollBlock(enroll_block)
                 enroll_block = []
                 enrollf.close()
-                #enroll_log_file.close()
-            if len(self.finished_enroll_subtask_uuids)==len(self.enroll_subtask_uuids):
-                print "enroll workers finished before producer reach this line"
+            if len(self.finished_enroll_subtask_uuids) == len(self.enroll_subtask_uuids):
+                print "[ENROLL] enroll workers finished before producer reach this line"
                 try:
                   if hasattr(self, 'enroll_result_ch'):
                     self.enroll_result_ch.stop_consuming()
                   else:
-                    print 'no busy enroll result channel yet'
+                    print '[ENROLL] no busy enroll result channel yet'
                 except Exception, e:
-                    print 'can cansel consuming'
+                    print '[ENROLL] can cansel consuming'
                     print e
             self.submitting_enroll = False
 
-        print "%d enrolls" % len(self.enroll_uuids)
-        print "all enrolls submitted, waiting for all results"
-        print 'wait for another 5 secs for enroll result to be tranferred'
+        print "[ENROLL] %d enrolls" % len(self.enroll_uuids)
+        print "[ENROLL] all enrolls submitted, waiting for all results"
+        print '[ENROLL] wait for another 5 secs for enroll results to be tranferred'
         time.sleep(5)
-        print "enroll finished, failed %d" % len(self.failed_enroll_uuids)
+        print "[ENROLL] enroll finished, failed %d" % len(self.failed_enroll_uuids)
 
     def doMatch(self):
         self.submitting_match = True
@@ -362,6 +366,7 @@ class RateProducer:
         cleanup_dir = "/".join(('temp', self.uuid[-12:]))
         self.ch.basic_publish(exchange='jobs-cleanup-exchange', routing_key='', body=pickle.dumps(cleanup_dir))
 
+    # 向 Rabbitmq 提交任务
     def submit(self, subtask):
         self.heart_beat_lock.acquire()
         if subtask==None:
@@ -373,13 +378,12 @@ class RateProducer:
         self.ch.basic_publish(exchange='', routing_key='jobs', body=pickle.dumps(subtask))
         self.heart_beat_lock.release()
 
+    # This method is just to let rabbitmq know we are alive
     def make_heart_beat(self):
-# This method is just to let the server know we are alive
       while True:
         with self.heart_beat_lock:
           self.conn.process_data_events()
-        print 'heart beat'
-        time.sleep(5)
+        time.sleep(10)
         if self.all_finished:
           break
 
