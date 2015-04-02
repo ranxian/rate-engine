@@ -5,15 +5,21 @@ import os
 import time
 import pika
 import socket
+import urllib2
+import base64
+import json
+import random
+import pickle
+import ftplib
 from multiprocessing import Process
 from pika.exceptions import AMQPConnectionError
-
 
 config = ConfigParser.ConfigParser()
 config.readfp(open('worker.conf', 'r'))
 SERVER=config.get('rate-worker', 'SERVER')
 WORKER_NUM=config.getint('rate-worker', 'WORKER_NUM')
 WORKER_RATE_ROOT=config.get('rate-worker', 'WORKER_RATE_ROOT')
+CHANGE_QUEUE_COUNT = 100
 
 try:
     FTP_USER=config.get('rate-worker', 'FTP_USER')
@@ -35,17 +41,16 @@ class Worker:
         self.clean_lock = clean_lock
         self.semaphore = semaphore
         self.process_lock = process_lock
-        self.CURRENT_WORKER_NUM = CURRENT_WORKER_NUM
 
         self.download_ftp = None
+        self.conn = None
 
         process_lock.acquire()
         self.worker_num = CURRENT_WORKER_NUM.value
         CURRENT_WORKER_NUM.value = CURRENT_WORKER_NUM.value + 1
         process_lock.release()
 
-        self.download_ftp = None
-        self.conn = None
+        self.job_queues = []
 
     def doClean(self, ch, method, properties, body):
         cleanpath = pickle.loads(body)
@@ -65,38 +70,253 @@ class Worker:
         finally:
             self.clean_lock.release()
 
-    def doWork(self):
-        pass
+    def checkDir(self, dirPath):
+        if os.path.isdir(dirPath):
+            return
 
-    def solve(self):
+        self.dir_lock.acquire()
+        try:
+            if not os.path.isdir(dirPath):
+                os.makedirs(dirPath)
+        except exceptions.OSError, e:
+            print e
+            traceback.print_exc()
+        finally:
+            self.dir_lock.release()
+
+    def checkFile(self, relPath):
+        tried = 0
+        absPath = os.path.join(WORKER_RATE_ROOT, relPath)
+        absPath = absPath.replace('\\', '/')
+        while not os.path.exists(absPath) or os.stat(absPath).st_size==0:
+            self.file_lock.acquire()
+            try:
+                if os.path.exists(absPath):
+                    return
+                try:
+                    self.checkDir(os.path.dirname(absPath))
+                    lf = open(absPath, 'wb')
+                    if not self.download_ftp:
+                        self.openDownloadFTP()
+                    self.download_ftp.retrbinary("RETR " + relPath, lf.write)
+                except Exception, e:
+                    print(e)
+                    tried = tried + 1
+                    print("%d: download: retry %d times" % (self.worker_num, tried))
+                    if lf:
+                        lf.close()
+                    if os.path.exists(absPath):
+                        os.remove(absPath)
+                    self.openDownloadFTP() # open ftp only if we need it, and close it when self.prepare() is done
+            finally:
+                self.file_lock.release()
+
+    def openUploadFTP(self, subtask):
+        print "%d: openUploadFTP()" % self.worker_num
         while True:
             try:
-                self.conn = pika.BlockingConnection(pika.ConnectionParameters(self.host))
-                self.ch = self.conn.channel()
-                print "[%d] [%s]" % (os.getpid(), str(self.worker_num)), 'queue server connected'
-                self.ch.basic_qos(prefetch_count=1)
-
-                self.ch.exchange_declare(exchange='jobs-cleanup-exchange', type='fanout')
-                my_cleanup_queue_name = self.ch.queue_declare(exclusive=True).method.queue
-                self.ch.queue_bind(exchange='jobs-cleanup-exchange', queue=my_cleanup_queue_name)
-                self.ch.basic_consume(self.doClean, queue=my_cleanup_queue_name, no_ack=True)
-
-                self.ch.queue_declare(queue = 'jobs', durable=False, exclusive=False, auto_delete=False)
-                self.ch.queue_bind
-                self.ch.basic_consume(self.doWork, queue='jobs')
-
-                self.ch.start_consuming()
-            except AMQPConnectionError, e:
-                print 'AMQPConnectionError: ', e
-                pass
-            except socket.error, e:
-                print "socket error: [", os.getpid(),"]", e
+                ftp = ftplib.FTP(SERVER, FTP_USER, FTP_PASSWORD)
+                ftpdir = 'RATE_ROOT/tasks/%s/templates' % subtask['task_uuid']
+                ftp.cwd(ftpdir)
+                return ftp
             except Exception, e:
                 print e
-            finally:
-                if self.conn:
-                    self.conn.close()
-            time.sleep(1)
+                traceback.print_exc()
+                time.sleep(1)
+
+    def openDownloadFTP(self):
+        print "%d: openDownloadFTP()" % self.worker_num
+        while True:
+            try:
+                self.download_ftp = ftplib.FTP(SERVER, FTP_USER, FTP_PASSWORD)
+                self.download_ftp.cwd('RATE_ROOT')
+                break
+            except Exception, e:
+                print e
+                time.sleep(1)
+
+    def prepare(self, subtask):
+        print "%s: prepare" % str(self.worker_num)
+        for f in subtask['files']:
+            self.checkFile(f)
+        if self.download_ftp != None:
+            try:
+                self.download_ftp.quit()
+                self.download_ftp = None
+            except Exception, e:
+                print e
+        print "%s: prepare finished" % str(self.worker_num)
+
+    def doEnroll(self, subtask):
+        import rate_run
+        enrollEXE = os.path.join(WORKER_RATE_ROOT, subtask['enrollEXE'])
+        timelimit = subtask['timelimit']
+        memlimit = subtask['memlimit']
+        rawResults = []
+        ftp = self.openUploadFTP(subtask)
+        for tinytask in subtask['tinytasks']:
+            u = tinytask['uuid']
+            rawResult = { 'uuid': u,'result':'failed' }
+            f = tinytask['file']
+            self.checkFile(f)
+            absImagePath = os.path.join(WORKER_RATE_ROOT, f).replace('/', os.path.sep)
+            absTemplatePath = os.path.join(WORKER_RATE_ROOT,'temp',subtask['producer_uuid'][-12:],u[-12:-10], "%s.t" % u[-10:]).replace('/', os.path.sep)
+            self.checkDir(os.path.dirname(absTemplatePath))
+            cmd = '%s %s %s' % (enrollEXE, absImagePath, absTemplatePath)
+
+            try:
+                (returncode, output) = rate_run.rate_run_main(int(timelimit), int(memlimit), cmd)
+                if returncode == 0 and os.path.exists(absTemplatePath):
+                    template_file = open(absTemplatePath, 'rb')
+                    tried = 0
+                    while True:
+                        try:
+                            ftp.storbinary('STOR ' + "%s/%s.t" % (u[-12:-10], u[-10:]), template_file)
+                            break
+                        except Exception, e:
+                            print e
+                            traceback.print_exc()
+                            print "%d: upload: retry %d" % (self.worker_num, tried)
+                            tried = tried + 1
+                            ftp = self.openUploadFTP(subtask)
+                            if tried == 16:
+                                break
+                    template_file.close()
+                    rawResult['result'] = 'ok'
+            except Exception, e:
+                print e
+                traceback.print_exc()
+                rawResult['result'] = 'failed'
+            rawResults.append(rawResult)
+        result = {}
+        result['results'] = rawResults
+
+        try:
+            ftp.quit()
+        except Exception, e:
+            print e
+
+        return result
+
+    def doMatch(self, subtask):
+        import rate_run
+        rawResults = []
+        timelimit = subtask['timelimit']
+        memlimit = subtask['memlimit']
+        matchEXE = os.path.join(WORKER_RATE_ROOT, subtask['matchEXE']).replace('/', os.path.sep)
+        for tinytask in subtask['tinytasks']:
+            u1 = tinytask['uuid1']
+            u2 = tinytask['uuid2']
+            f1 = tinytask['file1']#.replace('/', os.path.sep)
+            f2 = tinytask['file2']#.replace('/', os.path.sep)
+            f1 = "/".join((WORKER_RATE_ROOT, f1))
+            f2 = "/".join((WORKER_RATE_ROOT, f2))
+            rawResult = {}
+            rawResult['uuid1'] = u1
+            rawResult['uuid2'] = u2
+            rawResult['match_type'] = tinytask['match_type']
+            rawResult['result'] = 'failed'
+            cmd = '%s %s %s' % (matchEXE, f1, f2)
+
+            try:
+                (returncode, output) = rate_run.rate_run_main(int(timelimit), int(memlimit), str(cmd))
+                if returncode != 0:
+                    rawResult['result'] = 'failed'
+                else:
+                    score = output.strip()
+                    score = float(score)
+                    rawResult['result'] = 'ok'
+                    rawResult['score'] = str(score)
+            except Exception, e:
+                print e
+                traceback.print_exc()
+                rawResult['result'] = 'failed'
+            rawResults.append(rawResult)
+
+        result = {}
+        result['results'] = rawResults
+        return result
+
+    def doWork(self, method, properties, body):
+        subtask = pickle.loads(body)
+        self.prepare(subtask)
+
+        try:
+            self.semaphore.acquire()
+            # do the job
+            if subtask['type'] == 'enroll':
+                print "%s: enroll begin" % str(self.worker_num)
+                result = self.doEnroll(subtask)
+                print "%s: enroll finished" % str(self.worker_num)
+            elif subtask['type'] == 'match':
+                print "%s: match begin" % str(self.worker_num)
+                result = self.doMatch(subtask)
+                print "%s: match finished" % str(self.worker_num)
+
+            # put result back
+            result['block_no'] = subtask['block_no']
+            result['type'] = subtask['type']
+            result_queue = 'results-%s-%s' % (subtask['type'], subtask['producer_uuid'])
+            #print 'result_queue:', result_queue
+            ch.queue_declare(queue=result_queue, durable=False, exclusive=False, auto_delete=False)
+            ch.basic_publish(exchange='', routing_key=result_queue, body=pickle.dumps(result))
+            ch.basic_ack(delivery_tag=method.delivery_tag)
+
+        except Exception, e:
+            traceback.print_exc()
+            raise
+        finally:
+            self.semaphore.release()
+
+    def refresh_queues(self):
+        base64string = base64.standard_b64encode('guest:guest').replace('\n', '')
+        request = urllib2.Request("http://localhost:15672/api/queues")
+        request.add_header("Authorization", "Basic %s" % base64string)
+        result = urllib2.urlopen(request)
+
+        queues_json = json.loads(result.read())
+        self.job_queues = []
+
+        for queue in queues_json:
+            if queue['name'].startswith('jobs'):
+                self.job_queues.append(queue['name'])
+
+        print self.job_queues
+
+    def solve(self):
+        self.refresh_queues()
+        self.conn = pika.BlockingConnection(pika.ConnectionParameters(self.host))
+        self.ch = self.conn.channel()
+        print "[%d] [%s]" % (os.getpid(), str(self.worker_num)), 'queue server connected'
+        self.ch.basic_qos(prefetch_count=1)
+
+        self.ch.exchange_declare(exchange='jobs-cleanup-exchange', type='fanout')
+        my_cleanup_queue_name = self.ch.queue_declare(exclusive=True).method.queue
+        self.ch.queue_bind(exchange='jobs-cleanup-exchange', queue=my_cleanup_queue_name)
+        self.ch.basic_consume(self.doClean, queue=my_cleanup_queue_name, no_ack=True)
+
+        work_count = 1
+        try:
+            while True:
+                queue = random.choice(self.job_queues)
+                self.ch.queue_declare(queue = queue, durable=False, exclusive=False, auto_delete=False)
+                while work_count % 100 != 0:
+                    work_count += 1
+                    (method, properties, body) = self.ch.basic_get(queue='jobs')
+                    if method == None:
+                        break
+                    self.doWork(method, properties, body)
+                work_count = 1
+        except AMQPConnectionError, e:
+            print 'AMQPConnectionError: ', e
+            pass
+        except socket.error, e:
+            print "socket error: [", os.getpid(),"]", e
+        except Exception, e:
+            print e
+        finally:
+            if self.conn:
+                self.conn.close()
 
 def clean_tmp_files():
     while True:

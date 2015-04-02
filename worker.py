@@ -150,15 +150,10 @@ class Worker:
             absImagePath = os.path.join(WORKER_RATE_ROOT, f).replace('/', os.path.sep)
             absTemplatePath = os.path.join(WORKER_RATE_ROOT,'temp',subtask['producer_uuid'][-12:],u[-12:-10], "%s.t" % u[-10:]).replace('/', os.path.sep)
             self.checkDir(os.path.dirname(absTemplatePath))
-            #cmd = '.\\rate_run.exe %s %s %s %s %s' % (str(timelimit), str(memlimit), enrollEXE, absImagePath, absTemplatePath)
             cmd = '%s %s %s' % (enrollEXE, absImagePath, absTemplatePath)
 
-#            cmdlogfile = open('./enrollcmd-%d.log' % self.worker_num, 'a')
-#            print>>cmdlogfile, cmd
-#            cmdlogfile.close()
             try:
                 (returncode, output) = rate_run.rate_run_main(int(timelimit), int(memlimit), cmd)
-#                print returncode
                 if returncode == 0 and os.path.exists(absTemplatePath):
                     template_file = open(absTemplatePath, 'rb')
                     tried = 0

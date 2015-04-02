@@ -23,12 +23,14 @@ MAX_WORKING_MATCH_SUBTASKS = config.getint('rate-server', 'MAX_WORKING_MATCH_SUB
 ENROLL_PROGRESS_PART = 0.3
 
 class Producer:
-    def __init__(self, buuid, auuid, result_dir, timelimit, memlimit):
+    def __init__(self, buuid, auuid, task_uuid, timelimit, memlimit):
         benchmark_dir = "/".join((RATE_ROOT, 'benchmarks', buuid))
         algorithm_dir = "/".join(('algorithms', auuid))
+        result_dir = "/".join(('tasks', task_uuid))
 
         self.buuid = buuid
         self.auuid = auuid
+        self.task_uuid = task_uuid
         self.result_dir = result_dir
         self.timelimit = timelimit
         self.memlimit = memlimit
@@ -65,6 +67,7 @@ class Producer:
     def solve(self):
         self.prepare()
         self.doEnroll()
+        self.doMatch()
 
     # 记录任务中间状态
     def dump_log(self):
@@ -93,6 +96,7 @@ class Producer:
             'timelimit'     : self.timelimit,
             'memlimit'      : self.memlimit,
             'tinytasks'     : tinytasks,
+            'task_uuid'     : self.task_uuid,
             'producer_uuid' : self.uuid,
             'enrollEXE'     : self.enrollEXE,
             'matchEXE'      : self.matchEXE,
@@ -153,6 +157,19 @@ class Producer:
         ch.start_consuming()
         ch.queue_delete(queue=self.enroll_result_qname)
 
+    def waitForMatchResults(self):
+        print '[MATCH] waiting for match results'
+        conn = pika.BlockingConnection(pika.ConnectionParameters(self.host))
+        ch = conn.channel()
+        self.match_result_ch = ch
+        ch.queue_declare(queue=self.match_result_qname, durable=False, exclusive=False, auto_delete=False)
+        
+        ch.basic_consume(self.matchCallBack, queue=self.match_result_qname)
+        ch.start_consuming()
+        ch.queue_delete(queue=self.match_result_qname)
+
+        self.match_result_file.close()
+
     def doEnroll(self):
         enroll_block = []
         block_no = 0
@@ -187,6 +204,84 @@ class Producer:
 
         self.submitting_enroll = False
 
+    def doMatch(self):
+        self.submitting_match = True
+        l = []
+        i = 0
+        self.submitted_match_count = 0
+        self.failed_match_count = 0
+        benchmarkf = open(self.benchmark_file_path, 'r')
+        with self.match_lock:
+            match_result_thread = threading.Thread(target=self.waitForMatchResults)
+            match_result_thread.daemon = True
+            match_result_thread.start()
+        wait = False
+        while True:
+            if wait == True:
+                time.sleep(5)
+                wait = False
+            with self.match_lock:
+                working_match_subtasks = len(self.match_subtask_uuids)-len(self.finished_match_subtask_uuids)
+                if working_match_subtasks >= MAX_WORKING_MATCH_SUBTASKS:
+                    print "%d match queue full, wait for 5 sec" % (working_match_subtasks, )
+                    wait = True
+                    continue
+                i = i+1
+
+                a = benchmarkf.readline() # 11 22 I
+                if len(a)==0:
+                    break
+
+                if i%100000==0:
+                    print "%d matches proceeded" % (i,)
+
+                (bxx1, bxx2, gOrI) = a.strip().split(' ')[:3]
+                u1 = self.bxx_uuid_table[bxx1]
+                u2 = self.bxx_uuid_table[bxx2]
+
+                # Check bitmap file
+                if self.manager.query_line(a) == 1:
+                  self.already_match_number += 1
+                  if self.already_match_number % 100000 == 0:
+                    print 'already', self.already_match_number, 'matched'
+                  continue
+
+                if u1 in self.failed_enroll_uuids or u2 in self.failed_enroll_uuids:
+                    continue
+                f1 = 'temp/%s/%s/%s.t' % (self.uuid[-12:], u1[-12:-10], u1[-10:])
+                f2 = 'temp/%s/%s/%s.t' % (self.uuid[-12:], u2[-12:-10], u2[-10:])
+                t = { 'uuid1':u1, 'uuid2':u2, 'file1':f1, 'file2':f2, 'match_type':gOrI }
+                l.append(t)
+                self.submitted_match_count += 1
+                if len(l) == MATCH_BLOCK_SIZE:
+                    self.submitMatchBlock(l)
+                    l = []
+                    if len(self.match_subtask_uuids)%10 == 0:
+                        print "[%d*%d] matches has been submitted" % (len(self.match_subtask_uuids), MATCH_BLOCK_SIZE)
+
+        all_match_finished = False
+        with self.match_lock:
+            if len(l)!=0:
+                self.submitMatchBlock(l)
+                l = []
+            if len(self.match_subtask_uuids) == len(self.finished_match_subtask_uuids):
+                print "match workers finished before producer reach this line"
+                try:
+                    self.match_result_ch.stop_consuming()
+                except Exception, e:
+                    all_match_finished = True
+                    print e
+            self.submitting_match = False
+        benchmarkf.close()
+
+        print "%d matches" % self.submitted_match_count
+        print "all matches submitted, waiting for all results"
+        if not all_match_finished:
+          match_result_thread.join()
+        print "match finished, failed %d" % self.failed_match_count
+        with self.heart_beat_lock:
+          self.all_finished = True
+
     def prepare(self):
         print '[PREPARE] begin'
 
@@ -211,7 +306,8 @@ class Producer:
 
         self.enroll_result_qname = 'results-enroll-%s' % (self.uuid,)
         self.match_result_qname = 'results-match-%s' % (self.uuid,)
-        self.job_qname = 'jobs.%s' % (self.uuid)
+        self.job_qname = 'jobs-%s' % (self.uuid)
+        self.job_qname = 'jobs'
 
         self.conn = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
         self.ch = self.conn.channel()
