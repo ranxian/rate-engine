@@ -3,3 +3,4 @@ rate_run_perf.txt
 dist/
 producer.conf
 *.pyc
+tasks/

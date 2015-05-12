@@ -51,6 +51,7 @@ class Producer:
 
         self.enroll_state = {}
         self.match_state = {}
+        self.enroll_failed_uuids = {}
         self.enroll_submitted = 0
         self.enroll_finished = 0
         self.enroll_failed = 0
@@ -119,11 +120,21 @@ class Producer:
         subtask = self.genSubtask(enroll_block, 'enroll')
         files = []
         files.append(self.enrollEXE)
-        files.append(self.matchEXE)
         for task in enroll_block:
             files.append(task['file'])
         subtask['files'] = files
         subtask["block_no"] = block_no
+        self.submit(subtask)
+
+    def submitMatch(self, match_block, block_no):
+        subtask = self.genSubtask(match_block, 'match')
+        files = []
+        files.append(self.enrollEXE)
+        for i in match_block:
+            files.append(i['file1'])
+            files.append(i['file2'])
+        subtask['files'] = files
+        subtask['block_no'] = block_no
         self.submit(subtask)
 
 
@@ -136,6 +147,7 @@ class Producer:
                 self.enroll_result_file.flush()
                 if rawResult['result']=='failed':
                     self.enroll_failed += 1
+                    self.enroll_failed_uuids.append(rawResult['uuid'])
 
             self.enroll_state[result['block_no']] = True
             self.dump_log()
@@ -171,6 +183,7 @@ class Producer:
         self.match_result_file.close()
 
     def doEnroll(self):
+        print '[ENROLL] begin'
         enroll_block = []
         block_no = 0
         self.submitting_enroll = True
@@ -193,23 +206,23 @@ class Producer:
                     with self.enroll_lock:
                         self.submitEnroll(enroll_block, block_no)
                         block_no += 1
-                        enroll_block = []
                         self.enroll_submitted += 1
+                        enroll_block = []
 
         with self.enroll_lock:
             if len(enroll_block) != 0:
-                block_no += 1
                 self.submitEnroll(enroll_block, block_no)
+                block_no += 1
                 self.enroll_submitted += 1
 
         self.submitting_enroll = False
 
     def doMatch(self):
+        print '[MATCH] begin'
         self.submitting_match = True
-        l = []
+        match_block = []
+        block_no = 0
         i = 0
-        self.submitted_match_count = 0
-        self.failed_match_count = 0
         benchmarkf = open(self.benchmark_file_path, 'r')
         with self.match_lock:
             match_result_thread = threading.Thread(target=self.waitForMatchResults)
@@ -221,66 +234,54 @@ class Producer:
                 time.sleep(5)
                 wait = False
             with self.match_lock:
-                working_match_subtasks = len(self.match_subtask_uuids)-len(self.finished_match_subtask_uuids)
-                if working_match_subtasks >= MAX_WORKING_MATCH_SUBTASKS:
-                    print "%d match queue full, wait for 5 sec" % (working_match_subtasks, )
+                if self.match_submitted - self.match_finished >= MAX_WORKING_MATCH_SUBTASKS:
+                    print "%d match queue full, wait for 5 sec" % (self.match_submitted - self.match_finished)
                     wait = True
                     continue
-                i = i+1
+                i += 1
 
-                a = benchmarkf.readline() # 11 22 I
-                if len(a)==0:
+                line = benchmarkf.readline() # 11 22 I
+                if len(line) == 0:
                     break
 
-                if i%100000==0:
+                if i % 100000 == 0:
                     print "%d matches proceeded" % (i,)
 
-                (bxx1, bxx2, gOrI) = a.strip().split(' ')[:3]
+                (bxx1, bxx2, gOrI) = line.strip().split(' ')[:3]
+
                 u1 = self.bxx_uuid_table[bxx1]
                 u2 = self.bxx_uuid_table[bxx2]
 
-                # Check bitmap file
-                if self.manager.query_line(a) == 1:
-                  self.already_match_number += 1
-                  if self.already_match_number % 100000 == 0:
-                    print 'already', self.already_match_number, 'matched'
-                  continue
-
-                if u1 in self.failed_enroll_uuids or u2 in self.failed_enroll_uuids:
+                if u1 in self.enroll_failed_uuids or u2 in self.enroll_failed_uuids:
                     continue
-                f1 = 'temp/%s/%s/%s.t' % (self.uuid[-12:], u1[-12:-10], u1[-10:])
-                f2 = 'temp/%s/%s/%s.t' % (self.uuid[-12:], u2[-12:-10], u2[-10:])
-                t = { 'uuid1':u1, 'uuid2':u2, 'file1':f1, 'file2':f2, 'match_type':gOrI }
-                l.append(t)
-                self.submitted_match_count += 1
-                if len(l) == MATCH_BLOCK_SIZE:
-                    self.submitMatchBlock(l)
-                    l = []
-                    if len(self.match_subtask_uuids)%10 == 0:
-                        print "[%d*%d] matches has been submitted" % (len(self.match_subtask_uuids), MATCH_BLOCK_SIZE)
 
-        all_match_finished = False
+                f1 = '%s/%s.t' % (self.template_dir, u1)
+                f2 = '%s/%s.t' % (self.template_dir, u2)
+                t = { 'uuid1':u1, 'uuid2':u2, 'file1':f1, 'file2':f2, 'match_type':gOrI }
+                match_block.append(t)
+                self.match_submitted += 1
+                if len(match_block) == MATCH_BLOCK_SIZE:
+                    self.submitMatch(match_block, block_no)
+                    block_no += 1
+                    self.match_submitted += 1
+                    match_block = []
+                    if block_no % 10 == 0:
+                        print "[%d*%d] matches has been submitted" % (self.match_submitted, MATCH_BLOCK_SIZE)
+
         with self.match_lock:
-            if len(l)!=0:
-                self.submitMatchBlock(l)
-                l = []
-            if len(self.match_subtask_uuids) == len(self.finished_match_subtask_uuids):
-                print "match workers finished before producer reach this line"
-                try:
-                    self.match_result_ch.stop_consuming()
-                except Exception, e:
-                    all_match_finished = True
-                    print e
+            if len(match_block)!=0:
+                self.submitMatch(match_block, block_no)
+                block_no += 1
+                self.match_submitted += 1
+                match_block = []
             self.submitting_match = False
         benchmarkf.close()
 
-        print "%d matches" % self.submitted_match_count
-        print "all matches submitted, waiting for all results"
-        if not all_match_finished:
-          match_result_thread.join()
-        print "match finished, failed %d" % self.failed_match_count
+        print "[MATCH] %d matches" % self.match_submitted
+        print "[MATCH] all matches submitted, waiting for all results"
+        print "[MATCH] match finished, failed %d" % self.match_failed
         with self.heart_beat_lock:
-          self.all_finished = True
+            self.all_finished = True
 
     def prepare(self):
         print '[PREPARE] begin'
@@ -304,6 +305,16 @@ class Producer:
 
             self.dump_log()
 
+        # uuid_table
+        with open(self.uuid_table_file_path, 'r') as f:
+            while True:
+                line = f.readline()
+                if line == '':
+                    break
+                key, uuid, path = line.split()
+                self.uuid_bxx_table[uuid] = key
+                self.bxx_uuid_table[key] = uuid
+
         self.enroll_result_qname = 'results-enroll-%s' % (self.uuid,)
         self.match_result_qname = 'results-match-%s' % (self.uuid,)
         self.job_qname = 'jobs-%s' % (self.uuid)
@@ -317,7 +328,7 @@ class Producer:
         hbt.daemon = True
         hbt.start()
         print '[PREPARE] start heart beat thread'
-        print "[PREPARE] -- prepare finished"
+        print "[PREPARE] finished"
 
 
 if __name__=='__main__':

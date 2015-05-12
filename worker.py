@@ -33,8 +33,6 @@ try:
 except:
     FTP_PASSWORD='xxxxxxxxxxxx'
 
-#log = open('worker.log', 'w')
-
 class Worker:
     def __init__(self, host, file_lock, dir_lock, ftp_mkd_lock, clean_lock, semaphore, process_lock, CURRENT_WORKER_NUM):
         self.host = host

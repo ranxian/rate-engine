@@ -477,9 +477,6 @@ class RateProducer:
 
         self.match_result_file.close()
 
-        # matchresult2bxx(self.benchmark_dir, self.result_file_dir)
-#        conn.close()
-
 if __name__=='__main__':
     usage = """Usage:
     python %s benchmark_uuid result_dir algorithm_uuid timelimit memlimit
