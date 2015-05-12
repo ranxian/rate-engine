@@ -10,7 +10,9 @@ import pickle
 import ConfigParser
 from uuid import uuid4
 import threading
+import logging
 
+logging.basicConfig()
 config = ConfigParser.ConfigParser()
 config.readfp(open('%s/producer.conf' % os.path.dirname(os.path.realpath(__file__)), 'r'))
 
@@ -19,6 +21,7 @@ MATCH_BLOCK_SIZE = config.getint('rate-server', 'MATCH_BLOCK_SIZE')
 RATE_ROOT = config.get('rate-server', 'RATE_ROOT')
 MAX_WORKING_ENROLL_SUBTASKS = config.getint('rate-server', 'MAX_WORKING_ENROLL_SUBTASKS')
 MAX_WORKING_MATCH_SUBTASKS = config.getint('rate-server', 'MAX_WORKING_MATCH_SUBTASKS')
+RABBITMQ_HOST=config.get('rate-server', 'RABBITMQ_HOST')
 
 ENROLL_PROGRESS_PART = 0.3
 
@@ -35,7 +38,7 @@ class Producer:
         self.timelimit = timelimit
         self.memlimit = memlimit
         self.finished = False
-        self.host = 'localhost'
+        self.host = RABBITMQ_HOST
 
         self.benchmark_file_path = "/".join((benchmark_dir, 'benchmark_bxx.txt'))
         self.uuid_table_file_path = "/".join((benchmark_dir, 'uuid_table.txt'))
@@ -137,7 +140,6 @@ class Producer:
         subtask['block_no'] = block_no
         self.submit(subtask)
 
-
     def enrollCallBack(self, ch, method, properties, body):
         with self.enroll_lock:
             result = pickle.loads(body)
@@ -157,6 +159,26 @@ class Producer:
                 (result['block_no'], self.enroll_finished, self.enroll_failed, self.enroll_submitted)
 
             if (not self.submitting_enroll) and self.enroll_finished == self.enroll_submitted:
+                ch.stop_consuming()
+
+    def matchCallBack(self, ch, method, properties, body):
+        with self.match_lock:
+            result = pickle.loads(body)
+            ch.basic_ack(delivery_tag=method.delivery_tag)
+            for rawResult in result['results']:
+                bxxid1 = self.uuid_bxx_table[rawResult['uuid1']]
+                bxxid2 = self.uuid_bxx_table[rawResult['uuid2']]
+                # Add match result to bitmap
+                aline = '%s %s' % (bxxid1, bxxid2)
+
+            self.finished_match_subtask_uuids.append(result['subtask_uuid'])
+            print "match result [%s] finished [%d/%d=%d%%] failed [%d/%d]" % (result['subtask_uuid'][:8], len(self.finished_match_subtask_uuids), len(self.match_subtask_uuids), 100*len(self.finished_match_subtask_uuids)/len(self.match_subtask_uuids), self.failed_match_count, self.submitted_match_count)
+
+            self.dump_log()
+
+            print 'flush status'
+            self.match_result_file.flush()
+            if (not self.submitting_match) and len(self.finished_match_subtask_uuids)==len(self.match_subtask_uuids):
                 ch.stop_consuming()
 
     def waitForEnrollResults(self):
@@ -216,6 +238,8 @@ class Producer:
                 self.enroll_submitted += 1
 
         self.submitting_enroll = False
+        while self.enroll_finished != self.enroll_submitted:
+            time.sleep(5)
 
     def doMatch(self):
         print '[MATCH] begin'
@@ -318,9 +342,8 @@ class Producer:
         self.enroll_result_qname = 'results-enroll-%s' % (self.uuid,)
         self.match_result_qname = 'results-match-%s' % (self.uuid,)
         self.job_qname = 'jobs-%s' % (self.uuid)
-        self.job_qname = 'jobs'
 
-        self.conn = pika.BlockingConnection(pika.ConnectionParameters('localhost'))
+        self.conn = pika.BlockingConnection(pika.ConnectionParameters(self.host))
         self.ch = self.conn.channel()
         self.ch.queue_declare(queue=self.job_qname, durable=False, exclusive=False, auto_delete=False)
 

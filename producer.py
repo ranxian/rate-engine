@@ -402,11 +402,7 @@ class RateProducer:
                     self.failed_enroll_uuids.add(uuid_)
             print "enroll result [%s] finished [%d/%d] failed/total [%d/%d]" % (result['subtask_uuid'][:8], len(self.finished_enroll_subtask_uuids), len(self.enroll_subtask_uuids), len(self.failed_enroll_uuids), len(self.enroll_uuids))
 
-            # write progress
-            state_file = open(self.state_file_path, 'w')
-            state_file.write("%f\n" % (progress_part * float(len(self.finished_enroll_subtask_uuids)) / len(self.enroll_subtask_uuids)))
-            state_file.close()
-#            self.enroll_result_file.flush()
+            self.dump_log()
 
             if (not self.submitting_enroll) and len(self.finished_enroll_subtask_uuids)==len(self.enroll_subtask_uuids):
                 print "enrollCallBack stop consuming"
@@ -414,24 +410,18 @@ class RateProducer:
 
     def matchCallBack(self, ch, method, properties, body):
         with self.match_lock:
-            print('loads body')
             result = pickle.loads(body)
-            print('basic_ack')
             ch.basic_ack(delivery_tag=method.delivery_tag)
-            print('write result')
             for rawResult in result['results']:
                 bxxid1 = self.uuid_bxx_table[rawResult['uuid1']]
                 bxxid2 = self.uuid_bxx_table[rawResult['uuid2']]
                 # Add match result to bitmap
                 aline = '%s %s' % (bxxid1, bxxid2)
-                self.manager.update_bitmap([aline])
 
             self.finished_match_subtask_uuids.append(result['subtask_uuid'])
             print "match result [%s] finished [%d/%d=%d%%] failed [%d/%d]" % (result['subtask_uuid'][:8], len(self.finished_match_subtask_uuids), len(self.match_subtask_uuids), 100*len(self.finished_match_subtask_uuids)/len(self.match_subtask_uuids), self.failed_match_count, self.submitted_match_count)
-            print 'write status'
-            state_file = open(self.state_file_path, 'w')
-            state_file.write("%f\n" % (0.3 + 0.7 * float(len(self.finished_match_subtask_uuids))/len(self.match_subtask_uuids)))
-            state_file.close()
+
+            self.dump_log()
 
             print 'flush status'
             self.match_result_file.flush()

@@ -11,9 +11,11 @@ import json
 import random
 import pickle
 import ftplib
+import logging
 from multiprocessing import Process
 from pika.exceptions import AMQPConnectionError
 
+logging.basicConfig()
 config = ConfigParser.ConfigParser()
 config.readfp(open('worker.conf', 'r'))
 SERVER=config.get('rate-worker', 'SERVER')
@@ -281,8 +283,6 @@ class Worker:
             if queue['name'].startswith('jobs'):
                 self.job_queues.append(queue['name'])
 
-        print self.job_queues
-
     def solve(self):
         self.refresh_queues()
         self.conn = pika.BlockingConnection(pika.ConnectionParameters(self.host))
@@ -302,7 +302,7 @@ class Worker:
                 self.ch.queue_declare(queue = queue, durable=False, exclusive=False, auto_delete=False)
                 while work_count % 100 != 0:
                     work_count += 1
-                    (method, properties, body) = self.ch.basic_get(queue='jobs')
+                    (method, properties, body) = self.ch.basic_get(queue=queue)
                     if method == None:
                         break
                     self.doWork(method, properties, body)
