@@ -150,62 +150,64 @@ class Worker:
         print "%s: prepare finished" % str(self.worker_num)
 
     def doEnroll(self, subtask):
-        import rate_run
+        # import rate_run
         enrollEXE = os.path.join(WORKER_RATE_ROOT, subtask['enrollEXE'])
         timelimit = subtask['timelimit']
         memlimit = subtask['memlimit']
         rawResults = []
-        ftp = self.openUploadFTP(subtask)
+        # ftp = self.openUploadFTP(subtask)
         for tinytask in subtask['tinytasks']:
             u = tinytask['uuid']
             rawResult = { 'uuid': u,'result':'failed' }
             f = tinytask['file']
-            self.checkFile(f)
+            # self.checkFile(f)
             absImagePath = os.path.join(WORKER_RATE_ROOT, f).replace('/', os.path.sep)
             absTemplatePath = os.path.join(WORKER_RATE_ROOT,'temp',subtask['producer_uuid'][-12:],u[-12:-10], "%s.t" % u[-10:]).replace('/', os.path.sep)
-            self.checkDir(os.path.dirname(absTemplatePath))
-            cmd = '%s %s %s' % (enrollEXE, absImagePath, absTemplatePath)
-
-            try:
-                (returncode, output) = rate_run.rate_run_main(int(timelimit), int(memlimit), cmd)
-                if returncode == 0 and os.path.exists(absTemplatePath):
-                    template_file = open(absTemplatePath, 'rb')
-                    tried = 0
-                    while True:
-                        try:
-                            ftp.storbinary('STOR ' + "%s/%s.t" % (u[-12:-10], u[-10:]), template_file)
-                            break
-                        except Exception, e:
-                            print e
-                            traceback.print_exc()
-                            print "%d: upload: retry %d" % (self.worker_num, tried)
-                            tried = tried + 1
-                            ftp = self.openUploadFTP(subtask)
-                            if tried == 16:
-                                break
-                    template_file.close()
-                    rawResult['result'] = 'ok'
-            except Exception, e:
-                print e
-                traceback.print_exc()
-                rawResult['result'] = 'failed'
+            # self.checkDir(os.path.dirname(absTemplatePath))
+            # cmd = '%s %s %s' % (enrollEXE, absImagePath, absTemplatePath)
+            rawResult['result'] = 'ok'
+            # try:
+            #     (returncode, output) = rate_run.rate_run_main(int(timelimit), int(memlimit), cmd)
+            #     if returncode == 0 and os.path.exists(absTemplatePath):
+            #         template_file = open(absTemplatePath, 'rb')
+            #         tried = 0
+            #         while True:
+            #             try:
+            #                 ftp.storbinary('STOR ' + "%s/%s.t" % (u[-12:-10], u[-10:]), template_file)
+            #                 break
+            #             except Exception, e:
+            #                 print e
+            #                 traceback.print_exc()
+            #                 print "%d: upload: retry %d" % (self.worker_num, tried)
+            #                 tried = tried + 1
+            #                 ftp = self.openUploadFTP(subtask)
+            #                 if tried == 16:
+            #                     break
+            #         template_file.close()
+            #         rawResult['result'] = 'ok'
+            # except Exception, e:
+            #     print e
+            #     traceback.print_exc()
+            #     rawResult['result'] = 'failed'
             rawResults.append(rawResult)
         result = {}
         result['results'] = rawResults
 
-        try:
-            ftp.quit()
-        except Exception, e:
-            print e
+        # try:
+        #     ftp.quit()
+        # except Exception, e:
+        #     print e
 
         return result
 
     def doMatch(self, subtask):
-        import rate_run
+        # import rate_run
         rawResults = []
         timelimit = subtask['timelimit']
         memlimit = subtask['memlimit']
         matchEXE = os.path.join(WORKER_RATE_ROOT, subtask['matchEXE']).replace('/', os.path.sep)
+
+        block_no = subtask['block_no']
         for tinytask in subtask['tinytasks']:
             u1 = tinytask['uuid1']
             u2 = tinytask['uuid2']
@@ -218,21 +220,26 @@ class Worker:
             rawResult['uuid2'] = u2
             rawResult['match_type'] = tinytask['match_type']
             rawResult['result'] = 'failed'
-            cmd = '%s %s %s' % (matchEXE, f1, f2)
 
-            try:
-                (returncode, output) = rate_run.rate_run_main(int(timelimit), int(memlimit), str(cmd))
-                if returncode != 0:
-                    rawResult['result'] = 'failed'
-                else:
-                    score = output.strip()
-                    score = float(score)
-                    rawResult['result'] = 'ok'
-                    rawResult['score'] = str(score)
-            except Exception, e:
-                print e
-                traceback.print_exc()
-                rawResult['result'] = 'failed'
+            # !
+            rawResult['result'] = 'ok'
+            rawResult['score'] = '0.1'
+
+            # cmd = '%s %s %s' % (matchEXE, f1, f2)
+
+            # try:
+            #     (returncode, output) = rate_run.rate_run_main(int(timelimit), int(memlimit), str(cmd))
+            #     if returncode != 0:
+            #         rawResult['result'] = 'failed'
+            #     else:
+            #         score = output.strip()
+            #         score = float(score)
+            #         rawResult['result'] = 'ok'
+            #         rawResult['score'] = str(score)
+            # except Exception, e:
+            #     print e
+            #     traceback.print_exc()
+            #     rawResult['result'] = 'failed'
             rawResults.append(rawResult)
 
         result = {}
@@ -241,7 +248,7 @@ class Worker:
 
     def doWork(self, method, properties, body):
         subtask = pickle.loads(body)
-        self.prepare(subtask)
+        # self.prepare(subtask)
 
         try:
             self.semaphore.acquire()
@@ -260,9 +267,9 @@ class Worker:
             result['type'] = subtask['type']
             result_queue = 'results-%s-%s' % (subtask['type'], subtask['producer_uuid'])
             #print 'result_queue:', result_queue
-            ch.queue_declare(queue=result_queue, durable=False, exclusive=False, auto_delete=False)
-            ch.basic_publish(exchange='', routing_key=result_queue, body=pickle.dumps(result))
-            ch.basic_ack(delivery_tag=method.delivery_tag)
+            self.ch.queue_declare(queue=result_queue, durable=False, exclusive=False, auto_delete=False)
+            self.ch.basic_publish(exchange='', routing_key=result_queue, body=pickle.dumps(result))
+            self.ch.basic_ack(delivery_tag=method.delivery_tag)
 
         except Exception, e:
             traceback.print_exc()
