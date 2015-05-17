@@ -83,7 +83,13 @@ class Producer:
             'enroll_submitted': self.enroll_submitted,
             'enroll_failed': self.enroll_failed,
             'enroll_failed_uuids': self.enroll_failed_uuids,
-            'enroll_state': self.enroll_state
+            'enroll_state': self.enroll_state,
+            'match_finished': self.match_finished,
+            'match_submitted': self.match_submitted,
+            'match_failed': self.match_failed,
+            'match_failed_uuids': self.match_failed_uuids,
+            'match_state': self.match_state,
+            'finished': self.finished
         }
         with open(self.log_file_path, 'w') as f:
             f.write(json.dumps(information))
@@ -98,6 +104,14 @@ class Producer:
             self.enroll_failed = information["enroll_failed"]
             self.enroll_failed_uuids = information["enroll_failed_uuids"]
             self.enroll_state = information["enroll_state"]
+
+            self.match_finished = information["match_finished"]
+            self.match_submitted = information["match_submitted"]
+            self.match_failed = information["match_failed"]
+            self.match_failed_uuids = information["match_failed_uuids"]
+            self.match_state = information["match_state"]
+
+            self.finished = information["finished"]
 
     def make_heart_beat(self):
         while True:
@@ -197,7 +211,7 @@ class Producer:
                 result_f.write(line)
                 if rawResult['result'] == 'failed':
                     self.match_finished += 1
-                    self.match_failed_uuids.append('%s-%s', bxxid1, bxxid2)
+                    self.match_failed_uuids.append('%s-%s', rawResult['uuid1'], rawResult['uuid2'])
             self.match_finished += 1
             result_f.close()
 
@@ -252,14 +266,19 @@ class Producer:
                 enroll_block.append(t)
 
                 if len(enroll_block) == ENROLL_BLOCK_SIZE:
-                    with self.enroll_lock:
-                        self.submitEnroll(enroll_block, block_no)
+                    if self.enroll_state.get(str(block_no)) != None:
                         block_no += 1
-                        self.enroll_submitted += 1
                         enroll_block = []
+                        continue
+                    else:
+                        with self.enroll_lock:
+                            self.submitEnroll(enroll_block, block_no)
+                            block_no += 1
+                            self.enroll_submitted += 1
+                            enroll_block = []
 
         with self.enroll_lock:
-            if len(enroll_block) != 0:
+            if len(enroll_block) != 0 and (not self.enroll_state.get(str(block_no)) != None):
                 self.submitEnroll(enroll_block, block_no)
                 block_no += 1
                 self.enroll_submitted += 1
@@ -312,15 +331,19 @@ class Producer:
                 t = { 'uuid1':u1, 'uuid2':u2, 'file1':f1, 'file2':f2, 'match_type':gOrI }
                 match_block.append(t)
                 if len(match_block) == MATCH_BLOCK_SIZE:
-                    self.submitMatch(match_block, block_no)
-                    block_no += 1
-                    self.match_submitted += 1
-                    match_block = []
-                    if block_no % 10 == 0:
-                        print "[MATCH] [%d*%d] matches has been submitted" % (self.match_submitted, MATCH_BLOCK_SIZE)
+                    if self.match_state.get(str(block_no)) != None:
+                        block_no += 1
+                        match_block = []
+                    else:
+                        self.submitMatch(match_block, block_no)
+                        block_no += 1
+                        self.match_submitted += 1
+                        match_block = []
+                        if block_no % 10 == 0:
+                            print "[MATCH] [%d*%d] matches has been submitted" % (self.match_submitted, MATCH_BLOCK_SIZE)
 
         with self.match_lock:
-            if len(match_block)!=0:
+            if len(match_block)!=0 and (self.match_state.get(str(block_no)) == None):
                 self.submitMatch(match_block, block_no)
                 block_no += 1
                 self.match_submitted += 1
@@ -333,7 +356,7 @@ class Producer:
 
         while self.match_submitted != self.match_finished:
             time.sleep(5)
-        print "[MATCH] finished, failed %d" % self.match_failed
+        print "[MATCH] finished, failed %d\n" % self.match_failed
 
     def prepare(self):
         print '[PREPARE] begin'
@@ -341,6 +364,10 @@ class Producer:
         if os.path.exists(self.log_file_path):
             print '[PREPARE] restore task from log'
             self.load_log()
+            print '[PREPARE] Enroll progress: %d/%d=%d%% [finished/submitted], %d failed' % (self.enroll_finished, self.enroll_submitted, 
+                                                float(self.enroll_finished) / self.enroll_submitted * 100, self.enroll_failed)
+            print '[PREPARE] Match progress: %d/%d=%d%% [finished/submitted], %d failed' % (self.match_finished, self.match_submitted, 
+                                                float(self.match_finished) / self.match_submitted * 100, self.match_failed)
         else:
             if not os.path.isdir(self.result_dir):
                 os.makedirs(self.result_dir)
