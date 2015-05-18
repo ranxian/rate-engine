@@ -485,7 +485,6 @@ if __name__=='__main__':
         while True:
             if p.all_finished:
                 break
-        print 'ok'
     except Exception, e:
         print e
     except KeyboardInterrupt, e:

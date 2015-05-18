@@ -420,7 +420,6 @@ if __name__=='__main__':
             if producer.finished:
                 break
             time.sleep(5)
-        print 'ok'
     except Exception, e:
         print e
     except KeyboardInterrupt, e:
