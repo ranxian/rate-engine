@@ -29,7 +29,7 @@ class Producer:
     def __init__(self, buuid, auuid, task_uuid, timelimit, memlimit):
         benchmark_dir = "/".join((RATE_ROOT, 'benchmarks', buuid))
         algorithm_dir = "/".join(('algorithms', auuid))
-        result_dir = "/".join(('tasks', task_uuid))
+        result_dir = "/".join((RATE_ROOT, 'tasks', task_uuid))
 
         self.buuid = buuid
         self.auuid = auuid
@@ -44,6 +44,7 @@ class Producer:
         self.uuid_table_file_path = "/".join((benchmark_dir, 'uuid_table.txt'))
         self.log_file_path = "/".join((result_dir, 'log.json'))
         self.template_dir = "/".join((result_dir, "templates"))
+        self.relative_template_dir = "/".join(('tasks', task_uuid, 'templates'))
 
         self.uuid_bxx_table = {}
         self.bxx_uuid_table = {}
@@ -73,7 +74,24 @@ class Producer:
         self.prepare()
         self.doEnroll()
         self.doMatch()
+        print 'deleting queues'
+        self.delete_queues()
         self.finished = True
+        self.dump_log()
+
+    def delete_queues(self):
+        try:
+            self.ch.queue_delete(queue=self.job_qname)
+        except Exception, e:
+            pass
+        try:
+            self.enroll_result_ch.queue_delete(queue=self.enroll_result_qname)
+        except Exception:
+            pass
+        try:
+            self.match_result_ch.queue_delete(queue=self.match_result_qname)
+        except Exception:
+            pass
 
     # 记录任务中间状态
     def dump_log(self):
@@ -92,7 +110,7 @@ class Producer:
             'finished': self.finished
         }
         with open(self.log_file_path, 'w') as f:
-            f.write(json.dumps(information))
+            f.write(json.dumps(information, indent=2, sort_keys=True))
 
     # 读取任务中间状态
     def load_log(self):
@@ -159,7 +177,7 @@ class Producer:
     def submitMatch(self, match_block, block_no):
         subtask = self.genSubtask(match_block, 'match')
         files = []
-        files.append(self.enrollEXE)
+        files.append(self.matchEXE)
         for i in match_block:
             files.append(i['file1'])
             files.append(i['file2'])
@@ -176,7 +194,7 @@ class Producer:
             result = pickle.loads(body)
             block_no = result['block_no']
             result_f = open(enroll_result_filename(block_no), 'w')
-            enroll_failed_f = open('/'.join(self.result_dir, 'enroll_failed.txt'), 'a+')
+            enroll_failed_f = open('/'.join((self.result_dir, 'enroll_failed.txt')), 'a+')
 
             for rawResult in result['results']:
                 result_f.write('%s %s\n' % (rawResult['uuid'], rawResult['result']))
@@ -194,8 +212,8 @@ class Producer:
             self.dump_log()
             ch.basic_ack(delivery_tag=method.delivery_tag)
 
-            print "[ENROLL] enroll result [%s] finished/failed/total [%d/%d/%d]" % \
-                (result['block_no'], self.enroll_finished, self.enroll_failed, self.enroll_submitted)
+            print "[ENROLL] enroll result [%s] finished/submitted [%d/%d] failed [%d]" % \
+                (result['block_no'], self.enroll_finished, self.enroll_submitted, self.enroll_failed)
 
             if (not self.submitting_enroll) and self.enroll_finished == self.enroll_submitted:
                 ch.stop_consuming()
@@ -209,18 +227,19 @@ class Producer:
             result = pickle.loads(body)
             block_no = result['block_no']
             result_f = open(match_result_filename(block_no), 'w')
-            match_failed_f = open('/'.join(self.result_dir, 'match_failed.txt'), 'a+')
+            match_failed_f = open('/'.join((self.result_dir, 'match_failed.txt')), 'a+')
             ch.basic_ack(delivery_tag=method.delivery_tag)
             for rawResult in result['results']:
                 bxxid1 = self.uuid_bxx_table[rawResult['uuid1']]
                 bxxid2 = self.uuid_bxx_table[rawResult['uuid2']]
-                line = '%s %s %s %s %s\n' % (bxxid1, bxxid2, rawResult['match_type'], rawResult['result'], rawResult['score'])
-                result_f.write(line)
-
                 if rawResult['result'] == 'failed':
-                    self.match_finished += 1
-                    self.match_failed_uuids.append('%s-%s', rawResult['uuid1'], rawResult['uuid2'])
-                    match_failed_f.write('%s %s %s\n', bxxid1, bxxid2, rawResult['match_type'])
+                    self.match_failed_uuids.append('%s-%s' % (rawResult['uuid1'], rawResult['uuid2']))
+                    self.match_failed += 1
+                    match_failed_f.write('%s %s %s\n' % (bxxid1, bxxid2, rawResult['match_type']))
+                    result_f.write('%s %s %s %s\n' % (bxxid1, bxxid2, rawResult['match_type'], rawResult['result']))
+                else:
+                    line = '%s %s %s %s %s\n' % (bxxid1, bxxid2, rawResult['match_type'], rawResult['result'], rawResult['score'])
+                    result_f.write(line)
 
             self.match_finished += 1
             match_failed_f.close()
@@ -229,9 +248,9 @@ class Producer:
             self.match_state[result['block_no']] = True
             self.dump_log()
 
-            print "[MATCH] match result [%s] finished [%d/%d=%d%%] failed [%d/%d]" % (result['block_no'], self.match_finished, 
-                                        self.match_submitted, float(self.match_finished) / self.match_submitted * 100,
-                                        self.match_failed, self.match_submitted)
+            print "[MATCH] match result [%s] finished [%d/%d=%d%%] failed [%d]" % (result['block_no'], self.match_finished * MATCH_BLOCK_SIZE, 
+                                        self.match_submittedi * MATCH_BLOCK_SIZE, float(self.match_finished) / self.match_submitted * 100,
+                                        self.match_failed)
 
             if (not self.submitting_match) and self.match_finished == self.match_submitted:
                 ch.stop_consuming()
@@ -253,8 +272,11 @@ class Producer:
         self.match_result_ch = ch
         ch.queue_declare(queue=self.match_result_qname, durable=False, exclusive=False, auto_delete=False)
         ch.basic_consume(self.matchCallBack, queue=self.match_result_qname)
-        ch.start_consuming()
-        ch.queue_delete(queue=self.match_result_qname)
+        try:
+            ch.start_consuming()
+            ch.queue_delete(queue=self.match_result_qname)
+        except Exception, e:
+            pass
 
     def doEnroll(self):
         print '[ENROLL] begin'
@@ -289,7 +311,7 @@ class Producer:
                             enroll_block = []
 
         with self.enroll_lock:
-            if len(enroll_block) != 0 and (not self.enroll_state.get(str(block_no)) != None):
+            if len(enroll_block) != 0 and (self.enroll_state.get(str(block_no)) == None):
                 self.submitEnroll(enroll_block, block_no)
                 block_no += 1
                 self.enroll_submitted += 1
@@ -297,7 +319,7 @@ class Producer:
         self.submitting_enroll = False
         while self.enroll_finished != self.enroll_submitted:
             time.sleep(5)
-        print '[ENROLL] finished, failed %d' % self.enroll_finished
+        print '[ENROLL] finished, failed %d\n' % self.enroll_failed
 
     def doMatch(self):
         print '[MATCH] begin'
@@ -337,8 +359,8 @@ class Producer:
                 if u1 in self.enroll_failed_uuids or u2 in self.enroll_failed_uuids:
                     continue
 
-                f1 = '%s/%s.t' % (self.template_dir, u1)
-                f2 = '%s/%s.t' % (self.template_dir, u2)
+                f1 = '%s/%s.t' % (self.relative_template_dir, u1)
+                f2 = '%s/%s.t' % (self.relative_template_dir, u2)
                 t = { 'uuid1':u1, 'uuid2':u2, 'file1':f1, 'file2':f2, 'match_type':gOrI }
                 match_block.append(t)
                 if len(match_block) == MATCH_BLOCK_SIZE:
@@ -365,7 +387,10 @@ class Producer:
         print "[MATCH] %d matches" % self.match_submitted
         print "[MATCH] all matches submitted, waiting for all results"
 
-        while self.match_submitted != self.match_finished:
+        while True:
+            with self.match_lock:
+                if self.match_submitted == self.match_finished:
+                    break
             time.sleep(5)
         print "[MATCH] finished, failed %d\n" % self.match_failed
 
@@ -376,11 +401,13 @@ class Producer:
             print '[PREPARE] restore task from log'
             self.load_log()
             if not self.enroll_submitted == 0:
-                print '[PREPARE] Enroll progress: %d/%d=%d%% [finished/submitted], %d failed' % (self.enroll_finished, self.enroll_submitted, 
-                                                float(self.enroll_finished) / self.enroll_submitted * 100, self.enroll_failed)
+                print '[PREPARE] Enroll progress: %d/%d=%d%% [finished/submitted], %d failed' % \
+                    (self.enroll_finished, self.enroll_submitted,
+                     float(self.enroll_finished) / self.enroll_submitted * 100, self.enroll_failed)
             if not self.match_submitted == 0:
-                print '[PREPARE] Match progress: %d/%d=%d%% [finished/submitted], %d failed' % (self.match_finished, self.match_submitted, 
-                                                float(self.match_finished) / self.match_submitted * 100, self.match_failed)
+                print '[PREPARE] Match progress: %d/%d=%d%% [finished/submitted], %d failed' % \
+                    (self.match_finished, self.match_submitted,
+                     float(self.match_finished) / self.match_submitted * 100, self.match_failed)
         else:
             if not os.path.isdir(self.result_dir):
                 os.makedirs(self.result_dir)
@@ -426,14 +453,16 @@ if __name__=='__main__':
         print usage
         exit()
 
+    producer = Producer(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5])
     try:
-        producer = Producer(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5])
         producer.solve()
         while True:
             if producer.finished:
                 break
             time.sleep(5)
     except Exception, e:
+        producer.delete_queues()
         print e
     except KeyboardInterrupt, e:
+        producer.delete_queues()
         print e
