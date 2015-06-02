@@ -97,7 +97,7 @@ class Worker:
         while not os.path.exists(absPath) or os.stat(absPath).st_size==0:
             self.file_lock.acquire()
             try:
-                if os.path.exists(absPath):
+                if os.path.exists(absPath): 
                     return
                 try:
                     self.checkDir(os.path.dirname(absPath))
@@ -107,6 +107,8 @@ class Worker:
                     self.download_ftp.retrbinary("RETR " + relPath, lf.write)
                 except Exception, e:
                     print(e)
+                    if tried > 16:
+                        break
                     tried = tried + 1
                     print("%d: download: retry %d times" % (self.worker_num, tried))
                     if lf:
@@ -172,12 +174,14 @@ class Worker:
             rawResult['result'] = 'ok'
             try:
                 (returncode, output) = rate_run.rate_run_main(int(timelimit), int(memlimit), cmd)
+                print returncode, 
                 if returncode == 0 and os.path.exists(absTemplatePath):
                     template_file = open(absTemplatePath, 'rb')
                     tried = 0
                     while True:
                         try:
-                            ftp.storbinary('STOR ' + "%s/%s.t" % (u[-12:-10], u[-10:]), template_file)
+                            ftp.storbinary('STOR ' + "%s.t" % (tinytask['uuid']), template_file)
+                            print 'store', tinytask['uuid'], '.t from', absTemplatePath
                             break
                         except Exception, e:
                             print e
@@ -189,6 +193,9 @@ class Worker:
                                 break
                     template_file.close()
                     rawResult['result'] = 'ok'
+                else:
+                    print 'did not exit with 0 or did not create template file'
+                    rawResult['result'] = 'failed'
             except Exception, e:
                 print e
                 traceback.print_exc()
@@ -223,12 +230,12 @@ class Worker:
             rawResult['uuid1'] = u1
             rawResult['uuid2'] = u2
             rawResult['match_type'] = tinytask['match_type']
-            rawResult['result'] = 'failed'
 
             cmd = '%s %s %s' % (matchEXE, f1, f2)
 
             try:
                 (returncode, output) = rate_run.rate_run_main(int(timelimit), int(memlimit), str(cmd))
+                print output
                 if returncode != 0:
                     rawResult['result'] = 'failed'
                 else:
@@ -248,7 +255,7 @@ class Worker:
 
     def doWork(self, method, properties, body):
         subtask = pickle.loads(body)
-        # self.prepare(subtask)
+        self.prepare(subtask)
 
         try:
             self.semaphore.acquire()
@@ -278,7 +285,7 @@ class Worker:
 
     def refresh_queues(self):
         base64string = base64.standard_b64encode('guest:guest').replace('\n', '')
-        request = urllib2.Request("http://localhost:15672/api/queues")
+        request = urllib2.Request("http://rate.pku.edu.cn:15672/api/queues")
         request.add_header("Authorization", "Basic %s" % base64string)
         result = urllib2.urlopen(request)
 
@@ -290,7 +297,6 @@ class Worker:
                 self.job_queues.append(queue['name'])
 
     def solve(self):
-        self.refresh_queues()
         self.conn = pika.BlockingConnection(pika.ConnectionParameters(self.host))
         self.ch = self.conn.channel()
         print "[%d] [%s]" % (os.getpid(), str(self.worker_num)), 'queue server connected'
@@ -304,6 +310,10 @@ class Worker:
         work_count = 1
         try:
             while True:
+                self.refresh_queues()
+                if len(self.job_queues) == 0:
+                    time.sleep(1)
+                    continue
                 queue = random.choice(self.job_queues)
                 self.ch.queue_declare(queue = queue, durable=False, exclusive=False, auto_delete=False)
                 while work_count % 100 != 0:
