@@ -4,3 +4,6 @@ dist/
 producer.conf
 *.pyc
 tasks/
+*.dll
+*.tmp
+*.exe

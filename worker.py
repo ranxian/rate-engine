@@ -173,7 +173,7 @@ class Worker:
             cmd = '%s %s %s' % (enrollEXE, absImagePath, absTemplatePath)
             rawResult['result'] = 'ok'
             try:
-                (returncode, output) = rate_run.rate_run_main(int(timelimit), int(memlimit), cmd)
+                (returncode, output) = rate_run.rate_run_main(int(3000), int(memlimit), cmd)
                 print returncode, 
                 if returncode == 0 and os.path.exists(absTemplatePath):
                     template_file = open(absTemplatePath, 'rb')
@@ -234,8 +234,7 @@ class Worker:
             cmd = '%s %s %s' % (matchEXE, f1, f2)
 
             try:
-                (returncode, output) = rate_run.rate_run_main(int(timelimit), int(memlimit), str(cmd))
-                print output
+                (returncode, output) = rate_run.rate_run_main(int(500), int(memlimit), str(cmd))
                 if returncode != 0:
                     rawResult['result'] = 'failed'
                 else:
@@ -284,17 +283,15 @@ class Worker:
             self.semaphore.release()
 
     def refresh_queues(self):
-        base64string = base64.standard_b64encode('guest:guest').replace('\n', '')
-        request = urllib2.Request("http://rate.pku.edu.cn:15672/api/queues")
-        request.add_header("Authorization", "Basic %s" % base64string)
+        request = urllib2.Request("http://rate.pku.edu.cn/admin/task_list")
         result = urllib2.urlopen(request)
-
-        queues_json = json.loads(result.read())
+        
+        body = result.read()
+        queues_json = json.loads(body)
         self.job_queues = []
 
-        for queue in queues_json:
-            if queue['name'].startswith('jobs'):
-                self.job_queues.append(queue['name'])
+        for uuid in queues_json['task_uuids']:
+            self.job_queues.append("jobs-" + uuid)
 
     def solve(self):
         self.conn = pika.BlockingConnection(pika.ConnectionParameters(self.host))
@@ -316,7 +313,7 @@ class Worker:
                     continue
                 queue = random.choice(self.job_queues)
                 self.ch.queue_declare(queue = queue, durable=False, exclusive=False, auto_delete=False)
-                while work_count % 100 != 0:
+                while work_count % 256 != 0:
                     work_count += 1
                     (method, properties, body) = self.ch.basic_get(queue=queue)
                     if method == None:
