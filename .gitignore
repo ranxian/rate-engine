@@ -4,3 +4,4 @@ dist/
 producer.conf
 *.pyc
 tasks/
+worker.conf

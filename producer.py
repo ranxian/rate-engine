@@ -8,9 +8,12 @@ import os
 import json
 import pickle
 import ConfigParser
-from uuid import uuid4
 import threading
 import logging
+import urllib
+import urllib2
+from uuid import uuid4
+from subprocess import call
 
 logging.basicConfig()
 config = ConfigParser.ConfigParser()
@@ -51,6 +54,10 @@ class Producer:
         self.enrollEXE = "/".join((algorithm_dir, 'enroll.exe'))
         self.matchEXE = "/".join((algorithm_dir, 'match.exe'))
 
+        self.enroll_result_all_filepath = '/'.join((result_dir, 'enroll_result.txt'))
+        self.genuine_result_filepath = '/'.join((result_dir, 'genuine.txt'))
+        self.imposter_result_filepath = '/'.join((result_dir, 'imposter.txt'))
+
         self.enroll_state = {}
         self.match_state = {}
         self.enroll_failed_uuids = []
@@ -72,24 +79,36 @@ class Producer:
 
     def solve(self):
         self.prepare()
-        self.doEnroll()
-        self.doMatch()
-        print 'deleting queues'
-        self.delete_queues()
-        self.finished = True
-        self.dump_log()
+        if not self.finished:
+            self.doEnroll()
+            self.doMatch()
+            self.preprocess()
+            self.finished = True
+            self.dump_log()
+
+    def preprocess(self):
+        print '[PRE-PROCESS] begin'
+        os.system(' '.join(("sort -k5,5", "-o", self.genuine_result_filepath+".sorted", self.genuine_result_filepath)))
+        os.system(' '.join(("sort -k5,5", "-o", self.imposter_result_filepath+".sorted", self.imposter_result_filepath)))
+        os.system(' '.join(("sort -k5,5", "-r", "-o", self.imposter_result_filepath+".rev", self.imposter_result_filepath)))
+        print '[PRE-PROCESS] sorted'
+        os.system(' '.join(("mv", self.genuine_result_filepath + ".sorted", self.genuine_result_filepath)))
+        os.system(' '.join(("mv", self.imposter_result_filepath + ".sorted", self.imposter_result_filepath)))
+        print '[PRE-PROCESS] done'
 
     def delete_queues(self):
+        conn = pika.BlockingConnection(pika.ConnectionParameters(RABBITMQ_HOST))
+        channel = conn.channel()
         try:
-            self.ch.queue_delete(queue=self.job_qname)
+            channel.queue_delete(queue=self.job_qname)
         except Exception, e:
             pass
         try:
-            self.enroll_result_ch.queue_delete(queue=self.enroll_result_qname)
+            channel.queue_delete(queue=self.enroll_result_qname)
         except Exception:
             pass
         try:
-            self.match_result_ch.queue_delete(queue=self.match_result_qname)
+            channel.queue_delete(queue=self.match_result_qname)
         except Exception:
             pass
 
@@ -134,10 +153,13 @@ class Producer:
     def make_heart_beat(self):
         while True:
             with self.heart_beat_lock:
-              self.conn.process_data_events()
+                try:
+                    self.conn.process_data_events()
+                except Exception, e:
+                    pass
             time.sleep(10)
             if self.finished:
-              break
+                break
 
     def genSubtask(self, tinytasks, taskType):
         subtask = {
@@ -194,10 +216,12 @@ class Producer:
             result = pickle.loads(body)
             block_no = result['block_no']
             result_f = open(enroll_result_filename(block_no), 'w')
+            result_all_f = open(self.enroll_result_all_filepath, 'a+')
             enroll_failed_f = open('/'.join((self.result_dir, 'enroll_failed.txt')), 'a+')
 
             for rawResult in result['results']:
                 result_f.write('%s %s\n' % (rawResult['uuid'], rawResult['result']))
+                result_all_f.write('%s %s\n' % (rawResult['uuid'], rawResult['result']))
                 if rawResult['result']=='failed':
                     self.enroll_failed += 1
                     self.enroll_failed_uuids.append(rawResult['uuid'])
@@ -206,6 +230,7 @@ class Producer:
             self.enroll_finished += 1
 
             enroll_failed_f.close()
+            result_all_f.close()
             result_f.close()
 
             self.enroll_state[result['block_no']] = True
@@ -222,34 +247,42 @@ class Producer:
         def match_result_filename(block_no):
             return '/'.join((self.result_dir, 'match_result_%d.txt' % (block_no)))
 
-
         with self.match_lock:
             result = pickle.loads(body)
             block_no = result['block_no']
             result_f = open(match_result_filename(block_no), 'w')
+            genuine_result_f = open(self.genuine_result_filepath, 'a+')
+            imposter_result_f = open(self.imposter_result_filepath, 'a+')
             match_failed_f = open('/'.join((self.result_dir, 'match_failed.txt')), 'a+')
             ch.basic_ack(delivery_tag=method.delivery_tag)
             for rawResult in result['results']:
                 bxxid1 = self.uuid_bxx_table[rawResult['uuid1']]
                 bxxid2 = self.uuid_bxx_table[rawResult['uuid2']]
                 if rawResult['result'] == 'failed':
-                    self.match_failed_uuids.append('%s-%s' % (rawResult['uuid1'], rawResult['uuid2']))
+                    self.match_failed_uuids.append('%s %s' % (rawResult['uuid1'], rawResult['uuid2']))
                     self.match_failed += 1
                     match_failed_f.write('%s %s %s\n' % (bxxid1, bxxid2, rawResult['match_type']))
-                    result_f.write('%s %s %s %s\n' % (bxxid1, bxxid2, rawResult['match_type'], rawResult['result']))
+                    line = '%s %s %s %s\n' % (bxxid1, bxxid2, rawResult['match_type'], rawResult['result'])
+                    result_f.write(line)
                 else:
                     line = '%s %s %s %s %s\n' % (bxxid1, bxxid2, rawResult['match_type'], rawResult['result'], rawResult['score'])
                     result_f.write(line)
+                    if rawResult['match_type'] == 'G':
+                        genuine_result_f.write(line)
+                    else:
+                        imposter_result_f.write(line)
 
             self.match_finished += 1
             match_failed_f.close()
+            imposter_result_f.close()
+            genuine_result_f.close()
             result_f.close()
 
             self.match_state[result['block_no']] = True
             self.dump_log()
 
-            print "[MATCH] match result [%s] finished [%d/%d=%d%%] failed [%d]" % (result['block_no'], self.match_finished * MATCH_BLOCK_SIZE, 
-                                        self.match_submittedi * MATCH_BLOCK_SIZE, float(self.match_finished) / self.match_submitted * 100,
+            print "[MATCH] match result [%s] finished [%d/%d=%d%%] failed [%d]" % (result['block_no'], self.match_finished, 
+                                        self.match_submitted, float(self.match_finished) / self.match_submitted * 100,
                                         self.match_failed)
 
             if (not self.submitting_match) and self.match_finished == self.match_submitted:
@@ -262,8 +295,11 @@ class Producer:
         self.enroll_result_ch = ch
         ch.queue_declare(queue=self.enroll_result_qname, durable=False, exclusive=False, auto_delete=False)
         ch.basic_consume(self.enrollCallBack, queue=self.enroll_result_qname)
-        ch.start_consuming()
-        ch.queue_delete(queue=self.enroll_result_qname)
+        try:
+            ch.start_consuming()
+            ch.queue_delete(queue=self.enroll_result_qname)
+        except Exception, e:
+            pass
 
     def waitForMatchResults(self):
         print '[MATCH] waiting for match results'
@@ -276,6 +312,7 @@ class Producer:
             ch.start_consuming()
             ch.queue_delete(queue=self.match_result_qname)
         except Exception, e:
+            print e
             pass
 
     def doEnroll(self):
@@ -413,6 +450,8 @@ class Producer:
                 os.makedirs(self.result_dir)
             if not os.path.exists(self.template_dir):
                 os.makedirs(self.template_dir)
+            if not os.path.exists(self.enroll_result_all_filepath):
+                pass
 
             self.uuid = uuid4().__str__()
             self.dump_log()
@@ -434,6 +473,9 @@ class Producer:
         self.conn = pika.BlockingConnection(pika.ConnectionParameters(self.host))
         self.ch = self.conn.channel()
         self.ch.queue_declare(queue=self.job_qname, durable=False, exclusive=False, auto_delete=False)
+        # Notify the creation of task
+        url = 'http://rate.pku.edu.cn/admin/add_task?uuid=' + self.uuid
+        res = urllib2.urlopen(url)
 
         hbt = threading.Thread(target=self.make_heart_beat)
         hbt.daemon = True
@@ -461,8 +503,11 @@ if __name__=='__main__':
                 break
             time.sleep(5)
     except Exception, e:
-        producer.delete_queues()
         print e
     except KeyboardInterrupt, e:
-        producer.delete_queues()
         print e
+    finally:
+        producer.delete_queues()
+        # notify the termination of task
+        url = 'http://rate.pku.edu.cn/admin/remove_task?uuid=' + producer.uuid
+        res = urllib2.urlopen(url)
