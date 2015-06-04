@@ -5,3 +5,6 @@ producer.conf
 *.pyc
 tasks/
 worker.conf
+*.dll
+*.tmp
+*.exe
