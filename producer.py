@@ -2,6 +2,7 @@
 # RATE-engine 评测任务生产者
 
 import sys
+import signal
 import time
 import pika
 import os
@@ -483,6 +484,17 @@ class Producer:
         print '[PREPARE] start heart beat thread'
         print "[PREPARE] finished\n"
 
+producer = None
+
+def signal_term_handler(signal, frame):
+    global producer
+    print 'Killed by other process. Trying to exit gracefully'
+    producer.delete_queues()
+    url = 'http://rate.pku.edu.cn/admin/remove_task?uuid=' + producer.uuid
+    res = urllib2.urlopen(url)
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, signal_term_handler)
 
 if __name__=='__main__':
     usage = """Usage:
@@ -496,6 +508,7 @@ if __name__=='__main__':
         exit()
 
     producer = Producer(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5])
+
     try:
         producer.solve()
         while True:
