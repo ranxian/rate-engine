@@ -98,7 +98,7 @@ class Worker:
         while not os.path.exists(absPath) or os.stat(absPath).st_size==0:
             self.file_lock.acquire()
             try:
-                if os.path.exists(absPath): 
+                if os.path.exists(absPath):
                     return
                 try:
                     self.checkDir(os.path.dirname(absPath))
@@ -175,7 +175,7 @@ class Worker:
             rawResult['result'] = 'ok'
             try:
                 (returncode, output) = rate_run.rate_run_main(int(3000), int(memlimit), cmd)
-                print returncode, 
+                print returncode,
                 if returncode == 0 and os.path.exists(absTemplatePath):
                     template_file = open(absTemplatePath, 'rb')
                     tried = 0
@@ -335,7 +335,7 @@ def update_job_queues(values):
         try:
             request = urllib2.Request("http://rate.pku.edu.cn/admin/task_list")
             result = urllib2.urlopen(request)
-        
+
             body = result.read()
             queues_json = json.loads(body)
             values["job_queues"] = []
@@ -383,6 +383,12 @@ if __name__=='__main__':
 
     ts = []
     t = Process(target=clean_tmp_files)
+    t.daemon = True
+    t.start()
+    ts.append(t)
+
+    # Update task queues
+    t = Process(target=update_job_queues, args=process_args)
     t.daemon = True
     t.start()
     ts.append(t)
