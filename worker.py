@@ -38,8 +38,9 @@ except:
     FTP_PASSWORD='xxxxxxxxxxxx'
 
 class Worker:
-    def __init__(self, host, file_lock, dir_lock, ftp_mkd_lock, clean_lock, semaphore, process_lock, CURRENT_WORKER_NUM):
+    def __init__(self, host, file_lock, dir_lock, ftp_mkd_lock, clean_lock, semaphore, process_lock, CURRENT_WORKER_NUM, values):
         self.host = host
+        self.shared_values = values
 
         self.file_lock = file_lock
         self.dir_lock = dir_lock
@@ -97,7 +98,7 @@ class Worker:
         while not os.path.exists(absPath) or os.stat(absPath).st_size==0:
             self.file_lock.acquire()
             try:
-                if os.path.exists(absPath): 
+                if os.path.exists(absPath):
                     return
                 try:
                     self.checkDir(os.path.dirname(absPath))
@@ -174,7 +175,7 @@ class Worker:
             rawResult['result'] = 'ok'
             try:
                 (returncode, output) = rate_run.rate_run_main(int(3000), int(memlimit), cmd)
-                print returncode, 
+                print returncode,
                 if returncode == 0 and os.path.exists(absTemplatePath):
                     template_file = open(absTemplatePath, 'rb')
                     tried = 0
@@ -282,17 +283,6 @@ class Worker:
         finally:
             self.semaphore.release()
 
-    def refresh_queues(self):
-        request = urllib2.Request("http://rate.pku.edu.cn/admin/task_list")
-        result = urllib2.urlopen(request)
-        
-        body = result.read()
-        queues_json = json.loads(body)
-        self.job_queues = []
-
-        for uuid in queues_json['task_uuids']:
-            self.job_queues.append("jobs-" + uuid)
-
     def solve(self):
         self.conn = pika.BlockingConnection(pika.ConnectionParameters(self.host))
         self.ch = self.conn.channel()
@@ -307,11 +297,11 @@ class Worker:
         work_count = 1
         try:
             while True:
-                self.refresh_queues()
-                if len(self.job_queues) == 0:
+                job_queues = self.values['job_queues']
+                if len(job_queues) == 0:
                     time.sleep(1)
                     continue
-                queue = random.choice(self.job_queues)
+                queue = random.choice(job_queues)
                 self.ch.queue_declare(queue = queue, durable=False, exclusive=False, auto_delete=False)
                 while work_count % 256 != 0:
                     work_count += 1
@@ -339,10 +329,27 @@ def clean_tmp_files():
         except Exception, e:
             pass
 
-def proc(file_lock, dir_lock, ftp_mkd_lock, clean_lock, semaphore, process_lock, CURRENT_WORKER_NUM):
+def update_job_queues(values):
+    while True:
+        sleep(3)
+        try:
+            request = urllib2.Request("http://rate.pku.edu.cn/admin/task_list")
+            result = urllib2.urlopen(request)
+
+            body = result.read()
+            queues_json = json.loads(body)
+            values["job_queues"] = []
+
+            for uuid in queues_json['task_uuids']:
+                values["job_queues"].append("jobs-" + uuid)
+        except Exception, e:
+            print e
+
+
+def proc(file_lock, dir_lock, ftp_mkd_lock, clean_lock, semaphore, process_lock, CURRENT_WORKER_NUM, values):
     while True:
         try:
-            w = Worker('%s' % (SERVER, ), file_lock, dir_lock, ftp_mkd_lock, clean_lock, semaphore, process_lock, CURRENT_WORKER_NUM)
+            w = Worker('%s' % (SERVER, ), file_lock, dir_lock, ftp_mkd_lock, clean_lock, semaphore, process_lock, CURRENT_WORKER_NUM, values)
             w.solve()
         except Exception, e:
             print e
@@ -361,6 +368,9 @@ if __name__=='__main__':
     CURRENT_WORKER_NUM=multiprocessing.Value("i")
     CURRENT_WORKER_NUM.value = 1
 
+    mgr = multiprocessing.Manager()
+    values = mgr.dict()
+
     process_args = []
     process_args.append(file_lock)
     process_args.append(dir_lock)
@@ -369,9 +379,16 @@ if __name__=='__main__':
     process_args.append(semaphore)
     process_args.append(process_lock)
     process_args.append(CURRENT_WORKER_NUM)
+    process_args.append(values)
 
     ts = []
     t = Process(target=clean_tmp_files)
+    t.daemon = True
+    t.start()
+    ts.append(t)
+
+    # Update task queues
+    t = Process(target=update_job_queues, args=process_args)
     t.daemon = True
     t.start()
     ts.append(t)
