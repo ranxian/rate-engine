@@ -7,7 +7,19 @@ from subprocess import call
 
 class Monitor(object):
   def shutdown_workers(self):
-    call(['taskkill', '/F', '/IM', '/T', 'worker.exe'])
+    try:
+      call(['taskkill', '/F', '/IM', 'cmd.exe', '/T'])
+      call(['taskkill', '/F', '/IM', 'worker.exe', '/T'])
+    except Exception, e:
+      print "can't kill workers", e
+      raise Exception("can't kill workers")
+
+  def start_workers(self):
+    try:
+      call(['cmd.exe', 'monitor.bat'])
+    except Exception, e:
+      print "can't start workers", e
+      raise Exception("can't start workers")
 
   @cherrypy.expose
   def index(self):
@@ -26,30 +38,52 @@ class Monitor(object):
   @cherrypy.expose
   @cherrypy.tools.json_out()
   def pull_worker(self, worker_url):
-    # First shutdown all workers
-    self.shutdown_workers()
+    try:
+      # First shutdown all workers
+      self.shutdown_workers()
+      # Then download
+      urllib.urlretrieve(worker_url, 'worker-update.zip')
+      zf = zipfile.ZipFile('worker-update.zip')
+      zf.extractall()
+      first_dir = zf.namelist()[0]
+      # Then move
+      for f in os.listdir(first_dir):
+        path = first_dir + f
+        shutil.move(path, '.')
+      # Then restart
+      self.start_workers()
 
-    urllib.urlretrieve(worker_url, 'worker-update.zip')
-    zf = zipfile.ZipFile('worker-update.zip')
-    zf.extractall()
-    first_dir = zf.namelist()[0]
-    for f in os.listdir(first_dir):
-      path = first_dir + f
-      shutil.move(path, '.')
-    
-    return { 'result': 'ok' }
+      return { 'result': 'ok' }
+    except Exception, e:
+      return { 'result': 'fail', 'reason': str(e) }
 
   @cherrypy.expose
+  @cherrypy.tools.json_out()
   def shutdown(self):
-    pass
+    try:
+      self.shutdown_workers()
+      return { 'result': 'ok' }
+    except Exception, e:
+      return { 'result': 'fail', 'reason': str(e) }
 
   @cherrypy.expose
+  @cherrypy.tools.json_out()
   def restart(self):
-    pass
+    try:
+      self.shutdown_workers()
+      self.start_workers()
+      return { 'result': 'ok' }
+    except Exception, e:
+      return { 'result': 'fail', 'reason': str(e) }
 
   @cherrypy.expose
+  @cherrypy.tools.json_out()
   def start(self):
-    pass
+    try:
+      self.start_workers()
+      return { 'result': 'ok' }
+    except Exception, e:
+      return { 'result': 'fail', 'reason': str(e) }
 
 if __name__ == '__main__':
   cherrypy.quickstart(Monitor())
