@@ -8,8 +8,14 @@ import json
 import time
 import json
 import psutil
+import ConfigParser
 from threading import Thread
 from subprocess import call
+
+config = ConfigParser.ConfigParser()
+config.readfp(open('%s/worker.conf' % os.path.dirname(os.path.realpath(__file__)), 'r'))
+
+WEB_SERVER=config.get('rate-worker', 'WEB_SERVER')
 
 class Monitor(object):
   def shutdown_workers(self):
@@ -104,13 +110,13 @@ if os.name != "nt":
         return socket.inet_ntoa(fcntl.ioctl(s.fileno(), 0x8915, struct.pack('256s',
                                 ifname[:15]))[20:24])
 
-def get_lan_ip():    
+def make_heartbeat():
   while True:
     try:
-      url = 'http://localhost:3000/worker_heartbeat?'
-      
+      url = 'http://' + WEB_SERVER + '/worker_heartbeat?'
+
       cpupercent = psutil.cpu_percent(interval=1)
-      url += 'cpu=' + str(cpupercent)
+      url += 'cpupercent=' + str(cpupercent)
 
       mem = psutil.virtual_memory()
       url += '&memtotal=' + str(mem.total)
@@ -139,4 +145,4 @@ if __name__ == '__main__':
     print e
 
   # cherrypy.quickstart(Monitor())
-  
+

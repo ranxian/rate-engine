@@ -1,0 +1,7 @@
+[rate-worker]
+SERVER=localhost
+WEB_SERVER=rate.pku.edu.cn
+WORKER_NUM=32
+WORKER_RATE_ROOT=./RATE_ROOT
+FTP_USER=root
+FTP_PASSWORD=passwd
