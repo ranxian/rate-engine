@@ -8,3 +8,4 @@ worker.conf
 *.dll
 *.tmp
 *.exe
+task_uuids.txt
