@@ -8,7 +8,6 @@ import os
 import time
 import pika
 import socket
-import urllib2
 import base64
 import json
 import random
@@ -341,23 +340,6 @@ def clean_tmp_files():
         except Exception, e:
             pass
 
-def update_job_queues():
-    while True:
-        time.sleep(3)
-        try:
-            request = urllib2.Request("http://rate.pku.edu.cn/admin/task_list")
-            result = urllib2.urlopen(request)
-
-            body = result.read()
-            queues_json = json.loads(body)
-
-            with open('task_uuids.txt', 'w') as f:
-                for uuid in queues_json['task_uuids']:
-                    f.write('%s\n' % (uuid))
-        except Exception, e:
-            print e
-
-
 def proc(file_lock, dir_lock, ftp_mkd_lock, clean_lock, semaphore, process_lock, CURRENT_WORKER_NUM):
     while True:
         try:
@@ -391,12 +373,6 @@ if __name__=='__main__':
 
     ts = []
     t = Process(target=clean_tmp_files)
-    t.daemon = True
-    t.start()
-    ts.append(t)
-
-    # Update task queues
-    t = Process(target=update_job_queues, args=())
     t.daemon = True
     t.start()
     ts.append(t)

@@ -3,6 +3,12 @@ import zipfile
 import urllib
 import shutil
 import os
+import urllib2
+import json
+import time
+import json
+import psutil
+from threading import Thread
 from subprocess import call
 
 class Monitor(object):
@@ -85,6 +91,52 @@ class Monitor(object):
     except Exception, e:
       return { 'result': 'fail', 'reason': str(e) }
 
+def make_heartbeat():
+  import os
+import socket
+
+if os.name != "nt":
+    import fcntl
+    import struct
+
+    def get_interface_ip(ifname):
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        return socket.inet_ntoa(fcntl.ioctl(s.fileno(), 0x8915, struct.pack('256s',
+                                ifname[:15]))[20:24])
+
+def get_lan_ip():    
+  while True:
+    try:
+      url = 'http://localhost:3000/worker_heartbeat?'
+      
+      cpupercent = psutil.cpu_percent(interval=1)
+      url += 'cpu=' + str(cpupercent)
+
+      mem = psutil.virtual_memory()
+      url += '&memtotal=' + str(mem.total)
+      url += '&memavailable=' + str(mem.available)
+      url += '&mempercent=' + str(mem.percent)
+
+      f = urllib2.urlopen(url)
+      print f.read()
+    except Exception, e:
+      print e
+
+    time.sleep(5)
+
 if __name__ == '__main__':
-  cherrypy.quickstart(Monitor())
+  # Start heartbeat thread
+  t = Thread(target=make_heartbeat, args=())
+  t.daemon = True
+  t.start()
+
+  try:
+    while True:
+      time.sleep(5)
+  except Exception, e:
+    print e
+  except KeyboardInterrupt, e:
+    print e
+
+  # cherrypy.quickstart(Monitor())
   
