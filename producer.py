@@ -13,6 +13,7 @@ import threading
 import logging
 import urllib
 import urllib2
+import traceback
 from uuid import uuid4
 from subprocess import call
 
@@ -91,7 +92,7 @@ class Producer:
         print '[PRE-PROCESS] begin'
         os.system(' '.join(("sort -k5,5", "-o", self.genuine_result_filepath+".sorted", self.genuine_result_filepath)))
         os.system(' '.join(("sort -k5,5", "-o", self.imposter_result_filepath+".sorted", self.imposter_result_filepath)))
-        os.system(' '.join(("sort -k5,5", "-r", "-o", self.imposter_result_filepath+".rev", self.imposter_result_filepath)))
+        os.system(' '.join(("sort -k5,5", "-r", "-o", self.imposter_result_filepath+".rev.txt", self.imposter_result_filepath)))
         print '[PRE-PROCESS] sorted'
         os.system(' '.join(("mv", self.genuine_result_filepath + ".sorted", self.genuine_result_filepath)))
         os.system(' '.join(("mv", self.imposter_result_filepath + ".sorted", self.imposter_result_filepath)))
@@ -101,8 +102,10 @@ class Producer:
         conn = pika.BlockingConnection(pika.ConnectionParameters(RABBITMQ_HOST))
         channel = conn.channel()
         try:
+            print 'delete queue', self.job_qname
             channel.queue_delete(queue=self.job_qname)
         except Exception, e:
+            trackback.print_exc()
             pass
         try:
             channel.queue_delete(queue=self.enroll_result_qname)
@@ -508,15 +511,16 @@ if __name__=='__main__':
         exit()
 
     producer = Producer(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5])
+    producer.solve()
 
     try:
-        producer.solve()
         while True:
             if producer.finished:
                 break
             time.sleep(5)
     except Exception, e:
         print e
+        traceback.print_exc()
     except KeyboardInterrupt, e:
         print e
     finally:
