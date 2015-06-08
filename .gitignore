@@ -9,3 +9,4 @@ worker.conf
 *.tmp
 *.exe
 task_uuids.txt
+*.zip
