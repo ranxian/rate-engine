@@ -10,3 +10,4 @@ worker.conf
 *.exe
 task_uuids.txt
 *.zip
+*.pyd

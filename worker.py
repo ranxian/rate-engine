@@ -14,6 +14,7 @@ import random
 import pickle
 import ftplib
 import logging
+import urllib2
 from multiprocessing import Process
 from pika.exceptions import AMQPConnectionError
 
@@ -172,8 +173,9 @@ class Worker:
             cmd = '%s %s %s' % (enrollEXE, absImagePath, absTemplatePath)
             rawResult['result'] = 'ok'
             try:
+                start = time.clock()
                 (returncode, output) = rate_run.rate_run_main(int(3000), int(memlimit), cmd)
-                print returncode,
+                elapsed = int(100 * (time.clock() - start))
                 if returncode == 0 and os.path.exists(absTemplatePath):
                     template_file = open(absTemplatePath, 'rb')
                     tried = 0
@@ -192,6 +194,7 @@ class Worker:
                                 break
                     template_file.close()
                     rawResult['result'] = 'ok'
+                    rawResult['time'] = str(elapsed)
                 else:
                     print 'did not exit with 0 or did not create template file'
                     rawResult['result'] = 'failed'
@@ -233,7 +236,9 @@ class Worker:
             cmd = '%s %s %s' % (matchEXE, f1, f2)
 
             try:
+                start = time.clock()
                 (returncode, output) = rate_run.rate_run_main(int(500), int(memlimit), str(cmd))
+                elapsed = int(100 * (time.clock() - start))
                 if returncode != 0:
                     rawResult['result'] = 'failed'
                 else:
@@ -241,6 +246,7 @@ class Worker:
                     score = float(score)
                     rawResult['result'] = 'ok'
                     rawResult['score'] = str(score)
+                    rawResult['time'] = str(elapsed)
             except Exception, e:
                 print e
                 traceback.print_exc()
@@ -340,6 +346,23 @@ def clean_tmp_files():
         except Exception, e:
             pass
 
+def update_job_queues():
+    while True:
+        time.sleep(3)
+        try:
+            request = urllib2.Request("http://rate.pku.edu.cn/admin/task_list")
+            result = urllib2.urlopen(request)
+
+            body = result.read()
+            queues_json = json.loads(body)
+
+            with open('task_uuids.txt', 'w') as f:
+                for uuid in queues_json['task_uuids']:
+                    f.write('%s\n' % (uuid))
+        except Exception, e:
+            print e
+            
+            
 def proc(file_lock, dir_lock, ftp_mkd_lock, clean_lock, semaphore, process_lock, CURRENT_WORKER_NUM):
     while True:
         try:
@@ -376,7 +399,13 @@ if __name__=='__main__':
     t.daemon = True
     t.start()
     ts.append(t)
-
+    
+    # Update task queues
+    t = Process(target=update_job_queues, args=())
+    t.daemon = True
+    t.start()
+    ts.append(t)
+    
     try:
         for i in range(WORKER_NUM*2):
             t = Process(target=proc, args=process_args)

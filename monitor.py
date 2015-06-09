@@ -1,19 +1,18 @@
-import cherrypy
 import zipfile
-import urllib
 import shutil
 import os
 import urllib2
 import json
 import time
 import json
-import psutil
 import ConfigParser
+import psutil
 from threading import Thread
 from subprocess import call
+import cherrypy
 
 config = ConfigParser.ConfigParser()
-config.readfp(open('%s/worker.conf' % os.path.dirname(os.path.realpath(__file__)), 'r'))
+config.readfp(open('worker.conf', 'r'))
 
 WEB_SERVER=config.get('rate-worker', 'WEB_SERVER')
 
@@ -28,7 +27,8 @@ class Monitor(object):
 
   def start_workers(self):
     try:
-      call(['cmd.exe', 'monitor.bat'])
+      t = Thread(target=start_workers)
+      t.start()
     except Exception, e:
       print "can't start workers", e
       raise Exception("can't start workers")
@@ -96,25 +96,15 @@ class Monitor(object):
       return { 'result': 'ok' }
     except Exception, e:
       return { 'result': 'fail', 'reason': str(e) }
-
-def make_heartbeat():
-  import os
-import socket
-
-if os.name != "nt":
-    import fcntl
-    import struct
-
-    def get_interface_ip(ifname):
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        return socket.inet_ntoa(fcntl.ioctl(s.fileno(), 0x8915, struct.pack('256s',
-                                ifname[:15]))[20:24])
+      
+def start_workers():
+  call(['monitor.bat'])
 
 def make_heartbeat():
   while True:
     try:
       url = 'http://' + WEB_SERVER + '/worker_heartbeat?'
-
+      
       cpupercent = psutil.cpu_percent(interval=1)
       url += 'cpupercent=' + str(cpupercent)
 
@@ -124,17 +114,26 @@ def make_heartbeat():
       url += '&mempercent=' + str(mem.percent)
 
       f = urllib2.urlopen(url)
+      
       print f.read()
     except Exception, e:
       print e
 
     time.sleep(5)
+    
+def start_server():
+  cherrypy.quickstart(Monitor())
 
 if __name__ == '__main__':
   # Start heartbeat thread
   t = Thread(target=make_heartbeat, args=())
   t.daemon = True
   t.start()
+  
+  t = Thread(target=start_server, args=())
+  t.daemon = True
+  t.start()
+
 
   try:
     while True:
@@ -143,6 +142,3 @@ if __name__ == '__main__':
     print e
   except KeyboardInterrupt, e:
     print e
-
-  # cherrypy.quickstart(Monitor())
-
