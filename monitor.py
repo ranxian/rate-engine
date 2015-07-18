@@ -1,6 +1,7 @@
 import zipfile
 import shutil
 import os
+import urllib
 import urllib2
 import json
 import time
@@ -8,7 +9,7 @@ import json
 import ConfigParser
 import psutil
 from threading import Thread
-from subprocess import call
+from multiprocessing import Process
 import cherrypy
 
 config = ConfigParser.ConfigParser()
@@ -19,16 +20,14 @@ WEB_SERVER=config.get('rate-worker', 'WEB_SERVER')
 class Monitor(object):
   def shutdown_workers(self):
     try:
-      call(['taskkill', '/F', '/IM', 'cmd.exe', '/T'])
-      call(['taskkill', '/F', '/IM', 'worker.exe', '/T'])
+      stop_workers()
     except Exception, e:
       print "can't kill workers", e
       raise Exception("can't kill workers")
 
   def start_workers(self):
     try:
-      t = Thread(target=start_workers)
-      t.start()
+      start_workers()
     except Exception, e:
       print "can't start workers", e
       raise Exception("can't start workers")
@@ -98,7 +97,21 @@ class Monitor(object):
       return { 'result': 'fail', 'reason': str(e) }
       
 def start_workers():
-  call(['monitor.bat'])
+  os.system('start "RATE_MONITOR" monitor.bat')
+  
+def stop_workers():
+  os.system('taskkill /F /FI "Windowtitle eq RATE_MONITOR*" /IM cmd.exe /T')
+  
+def update_task_uuids():
+  request = urllib2.Request("http://" + WEB_SERVER + "/admin/task_list")
+  result = urllib2.urlopen(request)
+  
+  body = result.read()
+  queues_json = json.loads(body)
+  
+  with open('task_uuids.txt', 'w') as f:
+    for uuid in queues_json['task_uuids']:
+      f.write('%s\n' % (uuid))
 
 def make_heartbeat():
   while True:
@@ -122,8 +135,11 @@ def make_heartbeat():
     time.sleep(5)
     
 def start_server():
+  cherrypy.config.update({ 'server.socket_host': '0.0.0.0' })
   cherrypy.quickstart(Monitor())
 
+worker_process = None
+  
 if __name__ == '__main__':
   # Start heartbeat thread
   t = Thread(target=make_heartbeat, args=())
@@ -133,8 +149,11 @@ if __name__ == '__main__':
   t = Thread(target=start_server, args=())
   t.daemon = True
   t.start()
-
-
+  
+  # Update task uuids
+  update_task_uuids()
+  start_workers()
+  
   try:
     while True:
       time.sleep(5)
@@ -142,3 +161,5 @@ if __name__ == '__main__':
     print e
   except KeyboardInterrupt, e:
     print e
+  finally:
+    stop_workers()

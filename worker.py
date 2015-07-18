@@ -130,7 +130,7 @@ class Worker:
             except Exception, e:
                 print e
                 traceback.print_exc()
-                time.sleep(1)
+                self.conn.sleep(1)
 
     def openDownloadFTP(self):
         print "%d: openDownloadFTP()" % self.worker_num
@@ -141,7 +141,7 @@ class Worker:
                 break
             except Exception, e:
                 print e
-                time.sleep(1)
+                self.conn.sleep(1)
 
     def prepare(self, subtask):
         print "%s: prepare" % str(self.worker_num)
@@ -290,7 +290,7 @@ class Worker:
     def read_job_queues(self):
         queues = []
         while not os.path.isfile('task_uuids.txt'):
-            time.sleep(1)
+            self.conn.sleep(1)
             
         with open('task_uuids.txt', 'r') as f:
             for line in f.readlines():
@@ -315,18 +315,20 @@ class Worker:
             while True:
                 job_queues = self.read_job_queues()
                 if len(job_queues) == 0:
-                    time.sleep(1)
+                    self.conn.sleep(1)
                     continue
 
                 queue = random.choice(job_queues)
-                self.ch.queue_declare(queue = queue, durable=False, exclusive=False, auto_delete=False)
-                while work_count % 256 != 0:
+                self.ch.queue_declare(queue = queue, durable=False, exclusive=False, auto_delete=False, passive=True)
+                while work_count % 5 != 0:
                     work_count += 1
                     (method, properties, body) = self.ch.basic_get(queue=queue)
                     if method == None:
                         break
                     self.doWork(method, properties, body)
                 work_count = 1
+        except pika.exceptions.ChannelClosed:
+            pass
         except AMQPConnectionError, e:
             print 'AMQPConnectionError: ', e
             pass
@@ -344,24 +346,7 @@ def clean_tmp_files():
             os.system("del *.tmp")
             time.sleep(600)
         except Exception, e:
-            pass
-
-def update_job_queues():
-    while True:
-        time.sleep(3)
-        try:
-            request = urllib2.Request("http://rate.pku.edu.cn/admin/task_list")
-            result = urllib2.urlopen(request)
-
-            body = result.read()
-            queues_json = json.loads(body)
-
-            with open('task_uuids.txt', 'w') as f:
-                for uuid in queues_json['task_uuids']:
-                    f.write('%s\n' % (uuid))
-        except Exception, e:
-            print e
-            
+            pass  
             
 def proc(file_lock, dir_lock, ftp_mkd_lock, clean_lock, semaphore, process_lock, CURRENT_WORKER_NUM):
     while True:
@@ -396,12 +381,6 @@ if __name__=='__main__':
 
     ts = []
     t = Process(target=clean_tmp_files)
-    t.daemon = True
-    t.start()
-    ts.append(t)
-    
-    # Update task queues
-    t = Process(target=update_job_queues, args=())
     t.daemon = True
     t.start()
     ts.append(t)
