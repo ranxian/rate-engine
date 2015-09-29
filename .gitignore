@@ -3,3 +3,11 @@ rate_run_perf.txt
 dist/
 producer.conf
 *.pyc
+tasks/
+worker.conf
+*.dll
+*.tmp
+*.exe
+task_uuids.txt
+*.zip
+*.pyd
